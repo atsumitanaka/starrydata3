@@ -26,6 +26,7 @@ from functools import lru_cache
 from typing import Any, Dict, List, Optional
 
 from fastapi import Body, Depends, FastAPI, Header, HTTPException
+from fastapi.responses import HTMLResponse
 from sqlmodel import Field, Session, SQLModel, create_engine, select
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -40,9 +41,43 @@ def _now() -> str:
 
 
 @lru_cache(maxsize=1)
-def kmds_schema() -> Dict[str, Any]:
+def _raw_kmds_schema() -> Dict[str, Any]:
     with open(SCHEMA_PATH, encoding="utf-8") as f:
         return json.load(f)
+
+
+@lru_cache(maxsize=1)
+def kmds_schema() -> Dict[str, Any]:
+    """The Starrydata3 schema: the official KMDS schema PLUS the extensions
+    Starrydata3 needs to store digitized curves — (1) `digitization_data` is a
+    valid field on a graph (the base schema only has a text `digitization`
+    note), and (2) the strict `g-NNN`/`f-NNN` local-id patterns are relaxed to
+    accept AutoLineDigitizer's stub ids ("Figure 8"). Everything else is the
+    real KMDS schema, so records stay KMDS-conformant where it matters."""
+    import copy
+    sd = copy.deepcopy(_raw_kmds_schema())
+    graph = (sd.get("$defs") or {}).get("graph") or {}
+    gp = graph.get("properties")
+    if isinstance(gp, dict):
+        gp["digitization_data"] = {
+            "type": ["object", "null"],
+            "description": "digitized curve data (Starrydata3 extension)"}
+
+    def relax(node):
+        if isinstance(node, dict):
+            props = node.get("properties")
+            if isinstance(props, dict):
+                for key, val in props.items():
+                    if key.endswith("local id") and isinstance(val, dict):
+                        val.pop("pattern", None)   # accept non-canonical ids
+            for k, v in node.items():
+                relax(v)
+        elif isinstance(node, list):
+            for x in node:
+                relax(x)
+
+    relax(sd)
+    return sd
 
 
 def validate_kmds(record: Dict[str, Any]) -> List[str]:
@@ -380,6 +415,125 @@ def list_properties(key: APIKey = Depends(require_scope("read"))):
     return {"count": len(props),
             "properties": [{"name": p.name, "category": p.category,
                             "default_unit": p.default_unit} for p in props]}
+
+
+# ---------------------------------------------------------------------------
+# Minimal web UI (server-rendered) — browse records and plotted curves.
+# Read-only; no API key needed for the display pages.
+# ---------------------------------------------------------------------------
+
+_PALETTE = ["#c0392b", "#2980b9", "#27ae60", "#8e44ad", "#d35400",
+            "#16a085", "#2c3e50", "#f39c12", "#7f8c8d", "#c0329b"]
+_PAGE = """<!doctype html><html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{title}</title><style>
+:root{{--navy:#0d2544;--blue:#1d5fa0;--pane:#eef4fa;--ink:#12263d;--ink2:#5b7590;--gold:#c89211}}
+*{{box-sizing:border-box}}body{{margin:0;background:var(--pane);color:var(--ink);
+font:14px/1.5 -apple-system,Segoe UI,Roboto,sans-serif}}
+header{{background:var(--navy);color:#eaf2fb;padding:14px 26px;display:flex;align-items:center;gap:12px}}
+header .star{{color:var(--gold);font-size:20px}}header b{{font-size:17px}}
+header a{{color:#9fc0e2;text-decoration:none;margin-left:auto;font-size:13px}}
+main{{max-width:1000px;margin:0 auto;padding:22px 26px}}
+.card{{background:#fff;border:1px solid #d2e2f1;border-radius:10px;padding:16px 18px;margin-bottom:16px;
+box-shadow:0 1px 0 rgba(13,37,68,.05),0 10px 24px -18px rgba(13,37,68,.25)}}
+h1{{font-size:20px;margin:.2em 0}}h2{{font-size:15px;color:var(--navy);margin:.2em 0 .1em}}
+a.rec{{text-decoration:none;color:var(--blue);font-weight:600}}
+table{{width:100%;border-collapse:collapse;font-size:13px}}
+th,td{{text-align:left;padding:6px 8px;border-bottom:1px solid #e1ecf7}}th{{color:var(--ink2)}}
+.chip{{display:inline-block;background:var(--pane);border:1px solid #d2e2f1;border-radius:20px;
+padding:2px 9px;margin:2px 4px 2px 0;font-size:12px}}
+.muted{{color:var(--ink2);font-size:12px}}svg{{background:#fff;border:1px solid #e1ecf7;border-radius:8px}}
+.legend span{{display:inline-flex;align-items:center;gap:5px;margin-right:12px;font-size:12px;color:var(--ink2)}}
+.legend i{{width:14px;height:3px;border-radius:2px;display:inline-block}}
+</style></head><body>
+<header><span class="star">&#9733;</span><b>Starrydata3</b>
+<span class="muted" style="color:#9fc0e2">KMDS materials-data service</span>
+<a href="/">records</a><a href="/docs">API</a></header>
+<main>{body}</main></body></html>"""
+
+
+def _esc(s):
+    return (str(s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
+
+
+def _plot_svg(curves):
+    """One SVG scatter/line plot for a list of curves sharing a property pair."""
+    pts_all = [p for c in curves for p in json.loads(c.points_json)]
+    if not pts_all:
+        return ""
+    xs = [p[0] for p in pts_all]; ys = [p[1] for p in pts_all]
+    xmin, xmax, ymin, ymax = min(xs), max(xs), min(ys), max(ys)
+    W, H, P = 640, 300, 46
+    sx = lambda v: P + (W - 2 * P) * ((v - xmin) / (xmax - xmin) if xmax > xmin else 0.5)
+    sy = lambda v: H - P - (H - 2 * P) * ((v - ymin) / (ymax - ymin) if ymax > ymin else 0.5)
+    marks, legend = [], []
+    for i, c in enumerate(curves):
+        col = _PALETTE[i % len(_PALETTE)]
+        pts = json.loads(c.points_json)
+        poly = " ".join(f"{sx(p[0]):.1f},{sy(p[1]):.1f}" for p in pts)
+        dots = "".join(f'<circle cx="{sx(p[0]):.1f}" cy="{sy(p[1]):.1f}" r="1.7" fill="{col}"/>' for p in pts[::3])
+        marks.append(f'<polyline points="{poly}" fill="none" stroke="{col}" stroke-width="1.6"/>{dots}')
+        legend.append(f'<span><i style="background:{col}"></i>{_esc(c.sample_name)} '
+                      f'<span class="muted">({c.n_points})</span></span>')
+    fmt = lambda v: f"{v:.3g}"
+    axis = (f'<line x1="{P}" y1="{H-P}" x2="{W-P}" y2="{H-P}" stroke="#9fb6cf"/>'
+            f'<line x1="{P}" y1="{P}" x2="{P}" y2="{H-P}" stroke="#9fb6cf"/>'
+            f'<text x="{P}" y="{H-P+16}" font-size="10" fill="#5b7590">{fmt(xmin)}</text>'
+            f'<text x="{W-P}" y="{H-P+16}" text-anchor="end" font-size="10" fill="#5b7590">{fmt(xmax)}</text>'
+            f'<text x="{P-6}" y="{H-P}" text-anchor="end" font-size="10" fill="#5b7590">{fmt(ymin)}</text>'
+            f'<text x="{P-6}" y="{P+6}" text-anchor="end" font-size="10" fill="#5b7590">{fmt(ymax)}</text>'
+            f'<text x="{W/2}" y="{H-8}" text-anchor="middle" font-size="12" fill="#12263d">'
+            f'{_esc(curves[0].prop_x)} ({_esc(curves[0].unit_x)})</text>'
+            f'<text x="14" y="{H/2}" text-anchor="middle" font-size="12" fill="#12263d" '
+            f'transform="rotate(-90 14 {H/2})">{_esc(curves[0].prop_y)} ({_esc(curves[0].unit_y)})</text>')
+    return (f'<svg viewBox="0 0 {W} {H}" style="width:100%;max-width:{W}px">{axis}{"".join(marks)}</svg>'
+            f'<div class="legend">{"".join(legend)}</div>')
+
+
+@app.get("/", response_class=HTMLResponse)
+def ui_index():
+    with Session(engine) as s:
+        recs = s.exec(select(Record)).all()
+        rows = ""
+        for r in recs:
+            n = len(s.exec(select(GraphCurve).where(GraphCurve.record_sid == r.sid)).all())
+            rows += (f'<tr><td><a class="rec" href="/view/{r.sid}">SID-{r.sid}</a></td>'
+                     f'<td>{_esc(r.title[:70])}</td><td class="muted">{_esc(r.doi)}</td>'
+                     f'<td>{n}</td></tr>')
+        pairs = {}
+        for g in s.exec(select(GraphCurve)).all():
+            pairs[(g.prop_x, g.prop_y)] = pairs.get((g.prop_x, g.prop_y), 0) + 1
+    chips = "".join(f'<span class="chip">{_esc(x)} vs {_esc(y)} <b>{n}</b></span>'
+                    for (x, y), n in sorted(pairs.items(), key=lambda kv: -kv[1]))
+    body = (f'<div class="card"><h1>Records</h1><table>'
+            f'<tr><th>ID</th><th>Title</th><th>DOI</th><th>curves</th></tr>'
+            f'{rows or "<tr><td colspan=4 class=muted>no records yet</td></tr>"}</table></div>'
+            f'<div class="card"><h2>Property pairs indexed</h2>{chips or "<span class=muted>none</span>"}</div>')
+    return _PAGE.format(title="Starrydata3", body=body)
+
+
+@app.get("/view/{sid}", response_class=HTMLResponse)
+def ui_view(sid: int):
+    with Session(engine) as s:
+        rec = s.exec(select(Record).where(Record.sid == sid)).first()
+        if not rec:
+            return HTMLResponse(_PAGE.format(title="not found",
+                                body=f'<div class="card">No record SID-{sid}. '
+                                     f'<a href="/">back</a></div>'), status_code=404)
+        curves = s.exec(select(GraphCurve).where(GraphCurve.record_sid == sid)).all()
+    groups = {}
+    for c in curves:
+        groups.setdefault((c.prop_x, c.prop_y, c.unit_x, c.unit_y), []).append(c)
+    plots = ""
+    for (px, py, _, _), cs in groups.items():
+        plots += (f'<div class="card"><h2>{_esc(px)} vs {_esc(py)}</h2>'
+                  f'<div class="muted">{len(cs)} curve(s), '
+                  f'{sum(c.n_points for c in cs)} points</div>{_plot_svg(cs)}</div>')
+    head = (f'<div class="card"><div class="muted">SID-{rec.sid} · {_esc(rec.doi)} · '
+            f'{rec.n_violations} schema violation(s)</div><h1>{_esc(rec.title)}</h1>'
+            f'<a href="/">&larr; all records</a> &nbsp; '
+            f'<a href="/api/v1/records/{sid}">raw KMDS JSON</a></div>')
+    return _PAGE.format(title=f"SID-{sid}", body=head + (plots or '<div class="card muted">no digitized curves</div>'))
 
 
 # Create tables at import so every entrypoint (uvicorn, TestClient, gunicorn)
