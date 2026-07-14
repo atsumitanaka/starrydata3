@@ -176,11 +176,19 @@ function draw(){
   // color by composition
   const comps=[...new Set(CUR.curves.map(c=>c.composition||c.sample))];
   const cmap={}; comps.forEach((c,i)=>cmap[c]=COL[i%COL.length]);
+  const yspan=(ymax-ymin)||1, xspan=(xmax-xmin)||1;
   CUR.curves.forEach(c=>{
     const col=cmap[c.composition||c.sample];
     const sp=[...c.points].sort((a,b)=>a[0]-b[0]);   // draw line in x order (no zig-zag)
-    g.strokeStyle=col;g.lineWidth=1.6;g.beginPath();
-    sp.forEach((p,j)=>{const X=sx(p[0]),Y=sy(p[1]);j?g.lineTo(X,Y):g.moveTo(X,Y)});g.stroke();
+    // break the line where consecutive points jump abnormally far in x OR y
+    // (a straight "bridge" across a broken/merged digitization) — keep real
+    // segments connected, skip the bridge.
+    const step=j=>Math.hypot((tx(sp[j][0])-tx(sp[j-1][0]))/xspan,(ty(sp[j][1])-ty(sp[j-1][1]))/yspan);
+    g.strokeStyle=col;g.lineWidth=1.6;g.beginPath();let pen=false;
+    sp.forEach((p,j)=>{const X=sx(p[0]),Y=sy(p[1]);
+      if(j>0 && step(j)>0.18) pen=false;
+      if(!pen){g.moveTo(X,Y);pen=true;}else g.lineTo(X,Y);});
+    g.stroke();
     g.fillStyle=col;
     sp.forEach((p,j)=>{if(j%3)return;g.beginPath();g.arc(sx(p[0]),sy(p[1]),1.6,0,7);g.fill()});
   });
@@ -283,8 +291,21 @@ def _svg_plot(curves):
     for i, c in enumerate(curves):
         col = PALETTE[i % len(PALETTE)]
         sp = sorted(c["points"], key=lambda p: p[0])   # x order, no zig-zag
-        poly = " ".join(f"{sx(p[0]):.1f},{sy(p[1]):.1f}" for p in sp)
-        marks.append(f'<polyline points="{poly}" fill="none" stroke="{col}" stroke-width="1.5"/>')
+        xspan = (max(xs) - min(xs)) or 1
+        yspan = (max(ys) - min(ys)) or 1
+        # split at abnormally large jumps in x OR y (bridges across broken pieces)
+        seg, segs = [], []
+        for j, p in enumerate(sp):
+            if j and ((abs(p[0] - sp[j - 1][0]) / xspan) ** 2
+                      + (abs(p[1] - sp[j - 1][1]) / yspan) ** 2) ** 0.5 > 0.18:
+                segs.append(seg); seg = []
+            seg.append(p)
+        segs.append(seg)
+        for s in segs:
+            if len(s) < 2:
+                continue
+            poly = " ".join(f"{sx(p[0]):.1f},{sy(p[1]):.1f}" for p in s)
+            marks.append(f'<polyline points="{poly}" fill="none" stroke="{col}" stroke-width="1.5"/>')
         leg.append(f'<span><i style="background:{col}"></i>{esc(c["sample"])}</span>')
     fmt = lambda v: (f"{v:.2e}" if v and (abs(v) < 0.01 or abs(v) >= 1e4) else f"{v:.4g}")
     ax = (f'<line x1="{P}" y1="{H-P}" x2="{W-18}" y2="{H-P}" stroke="#9fb6cf"/>'
