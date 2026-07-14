@@ -418,122 +418,78 @@ def list_properties(key: APIKey = Depends(require_scope("read"))):
 
 
 # ---------------------------------------------------------------------------
-# Minimal web UI (server-rendered) — browse records and plotted curves.
-# Read-only; no API key needed for the display pages.
+# UI data endpoints (public, read-only JSON for the web frontend).
 # ---------------------------------------------------------------------------
 
-_PALETTE = ["#c0392b", "#2980b9", "#27ae60", "#8e44ad", "#d35400",
-            "#16a085", "#2c3e50", "#f39c12", "#7f8c8d", "#c0329b"]
-_PAGE = """<!doctype html><html><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>{title}</title><style>
-:root{{--navy:#0d2544;--blue:#1d5fa0;--pane:#eef4fa;--ink:#12263d;--ink2:#5b7590;--gold:#c89211}}
-*{{box-sizing:border-box}}body{{margin:0;background:var(--pane);color:var(--ink);
-font:14px/1.5 -apple-system,Segoe UI,Roboto,sans-serif}}
-header{{background:var(--navy);color:#eaf2fb;padding:14px 26px;display:flex;align-items:center;gap:12px}}
-header .star{{color:var(--gold);font-size:20px}}header b{{font-size:17px}}
-header a{{color:#9fc0e2;text-decoration:none;margin-left:auto;font-size:13px}}
-main{{max-width:1000px;margin:0 auto;padding:22px 26px}}
-.card{{background:#fff;border:1px solid #d2e2f1;border-radius:10px;padding:16px 18px;margin-bottom:16px;
-box-shadow:0 1px 0 rgba(13,37,68,.05),0 10px 24px -18px rgba(13,37,68,.25)}}
-h1{{font-size:20px;margin:.2em 0}}h2{{font-size:15px;color:var(--navy);margin:.2em 0 .1em}}
-a.rec{{text-decoration:none;color:var(--blue);font-weight:600}}
-table{{width:100%;border-collapse:collapse;font-size:13px}}
-th,td{{text-align:left;padding:6px 8px;border-bottom:1px solid #e1ecf7}}th{{color:var(--ink2)}}
-.chip{{display:inline-block;background:var(--pane);border:1px solid #d2e2f1;border-radius:20px;
-padding:2px 9px;margin:2px 4px 2px 0;font-size:12px}}
-.muted{{color:var(--ink2);font-size:12px}}svg{{background:#fff;border:1px solid #e1ecf7;border-radius:8px}}
-.legend span{{display:inline-flex;align-items:center;gap:5px;margin-right:12px;font-size:12px;color:var(--ink2)}}
-.legend i{{width:14px;height:3px;border-radius:2px;display:inline-block}}
-</style></head><body>
-<header><span class="star">&#9733;</span><b>Starrydata3</b>
-<span class="muted" style="color:#9fc0e2">KMDS materials-data service</span>
-<a href="/">records</a><a href="/docs">API</a></header>
-<main>{body}</main></body></html>"""
-
-
-def _esc(s):
-    return (str(s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
-
-
-def _plot_svg(curves):
-    """One SVG scatter/line plot for a list of curves sharing a property pair."""
-    pts_all = [p for c in curves for p in json.loads(c.points_json)]
-    if not pts_all:
-        return ""
-    xs = [p[0] for p in pts_all]; ys = [p[1] for p in pts_all]
-    xmin, xmax, ymin, ymax = min(xs), max(xs), min(ys), max(ys)
-    W, H, P = 640, 300, 46
-    sx = lambda v: P + (W - 2 * P) * ((v - xmin) / (xmax - xmin) if xmax > xmin else 0.5)
-    sy = lambda v: H - P - (H - 2 * P) * ((v - ymin) / (ymax - ymin) if ymax > ymin else 0.5)
-    marks, legend = [], []
-    for i, c in enumerate(curves):
-        col = _PALETTE[i % len(_PALETTE)]
-        pts = json.loads(c.points_json)
-        poly = " ".join(f"{sx(p[0]):.1f},{sy(p[1]):.1f}" for p in pts)
-        dots = "".join(f'<circle cx="{sx(p[0]):.1f}" cy="{sy(p[1]):.1f}" r="1.7" fill="{col}"/>' for p in pts[::3])
-        marks.append(f'<polyline points="{poly}" fill="none" stroke="{col}" stroke-width="1.6"/>{dots}')
-        legend.append(f'<span><i style="background:{col}"></i>{_esc(c.sample_name)} '
-                      f'<span class="muted">({c.n_points})</span></span>')
-    fmt = lambda v: f"{v:.3g}"
-    axis = (f'<line x1="{P}" y1="{H-P}" x2="{W-P}" y2="{H-P}" stroke="#9fb6cf"/>'
-            f'<line x1="{P}" y1="{P}" x2="{P}" y2="{H-P}" stroke="#9fb6cf"/>'
-            f'<text x="{P}" y="{H-P+16}" font-size="10" fill="#5b7590">{fmt(xmin)}</text>'
-            f'<text x="{W-P}" y="{H-P+16}" text-anchor="end" font-size="10" fill="#5b7590">{fmt(xmax)}</text>'
-            f'<text x="{P-6}" y="{H-P}" text-anchor="end" font-size="10" fill="#5b7590">{fmt(ymin)}</text>'
-            f'<text x="{P-6}" y="{P+6}" text-anchor="end" font-size="10" fill="#5b7590">{fmt(ymax)}</text>'
-            f'<text x="{W/2}" y="{H-8}" text-anchor="middle" font-size="12" fill="#12263d">'
-            f'{_esc(curves[0].prop_x)} ({_esc(curves[0].unit_x)})</text>'
-            f'<text x="14" y="{H/2}" text-anchor="middle" font-size="12" fill="#12263d" '
-            f'transform="rotate(-90 14 {H/2})">{_esc(curves[0].prop_y)} ({_esc(curves[0].unit_y)})</text>')
-    return (f'<svg viewBox="0 0 {W} {H}" style="width:100%;max-width:{W}px">{axis}{"".join(marks)}</svg>'
-            f'<div class="legend">{"".join(legend)}</div>')
-
-
-@app.get("/", response_class=HTMLResponse)
-def ui_index():
+@app.get("/ui/stats")
+def ui_stats():
     with Session(engine) as s:
         recs = s.exec(select(Record)).all()
-        rows = ""
-        for r in recs:
-            n = len(s.exec(select(GraphCurve).where(GraphCurve.record_sid == r.sid)).all())
-            rows += (f'<tr><td><a class="rec" href="/view/{r.sid}">SID-{r.sid}</a></td>'
-                     f'<td>{_esc(r.title[:70])}</td><td class="muted">{_esc(r.doi)}</td>'
-                     f'<td>{n}</td></tr>')
-        pairs = {}
-        for g in s.exec(select(GraphCurve)).all():
-            pairs[(g.prop_x, g.prop_y)] = pairs.get((g.prop_x, g.prop_y), 0) + 1
-    chips = "".join(f'<span class="chip">{_esc(x)} vs {_esc(y)} <b>{n}</b></span>'
-                    for (x, y), n in sorted(pairs.items(), key=lambda kv: -kv[1]))
-    body = (f'<div class="card"><h1>Records</h1><table>'
-            f'<tr><th>ID</th><th>Title</th><th>DOI</th><th>curves</th></tr>'
-            f'{rows or "<tr><td colspan=4 class=muted>no records yet</td></tr>"}</table></div>'
-            f'<div class="card"><h2>Property pairs indexed</h2>{chips or "<span class=muted>none</span>"}</div>')
-    return _PAGE.format(title="Starrydata3", body=body)
+        curves = s.exec(select(GraphCurve)).all()
+        props = s.exec(select(Property)).all()
+    pairs = {(c.prop_x, c.prop_y) for c in curves}
+    comps = {c.composition for c in curves if c.composition}
+    return {"records": len(recs), "curves": len(curves), "property_pairs": len(pairs),
+            "compositions": len(comps), "vocabulary": len(props),
+            "points": sum(c.n_points for c in curves)}
 
 
-@app.get("/view/{sid}", response_class=HTMLResponse)
-def ui_view(sid: int):
+@app.get("/ui/papers")
+def ui_papers(q: str = ""):
+    """Paper list with a free-text filter over title / DOI / composition / property."""
+    ql = q.strip().lower()
     with Session(engine) as s:
-        rec = s.exec(select(Record).where(Record.sid == sid)).first()
-        if not rec:
-            return HTMLResponse(_PAGE.format(title="not found",
-                                body=f'<div class="card">No record SID-{sid}. '
-                                     f'<a href="/">back</a></div>'), status_code=404)
-        curves = s.exec(select(GraphCurve).where(GraphCurve.record_sid == sid)).all()
-    groups = {}
+        recs = s.exec(select(Record)).all()
+        curves = s.exec(select(GraphCurve)).all()
+    by_sid = {}
     for c in curves:
-        groups.setdefault((c.prop_x, c.prop_y, c.unit_x, c.unit_y), []).append(c)
-    plots = ""
-    for (px, py, _, _), cs in groups.items():
-        plots += (f'<div class="card"><h2>{_esc(px)} vs {_esc(py)}</h2>'
-                  f'<div class="muted">{len(cs)} curve(s), '
-                  f'{sum(c.n_points for c in cs)} points</div>{_plot_svg(cs)}</div>')
-    head = (f'<div class="card"><div class="muted">SID-{rec.sid} · {_esc(rec.doi)} · '
-            f'{rec.n_violations} schema violation(s)</div><h1>{_esc(rec.title)}</h1>'
-            f'<a href="/">&larr; all records</a> &nbsp; '
-            f'<a href="/api/v1/records/{sid}">raw KMDS JSON</a></div>')
-    return _PAGE.format(title=f"SID-{sid}", body=head + (plots or '<div class="card muted">no digitized curves</div>'))
+        d = by_sid.setdefault(c.record_sid, {"n": 0, "comps": set(), "props": set()})
+        d["n"] += 1
+        if c.composition:
+            d["comps"].add(c.composition)
+        d["props"].add(c.prop_x); d["props"].add(c.prop_y)
+    out = []
+    for r in recs:
+        info = by_sid.get(r.sid, {"n": 0, "comps": set(), "props": set()})
+        hay = " ".join([r.title, r.doi, " ".join(info["comps"]), " ".join(info["props"])]).lower()
+        if ql and ql not in hay:
+            continue
+        out.append({"sid": r.sid, "doi": r.doi, "title": r.title,
+                    "curves": info["n"], "n_samples": len(info["comps"]),
+                    "compositions": sorted(info["comps"])[:6],
+                    "properties": sorted(info["props"])})
+    out.sort(key=lambda x: -x["curves"])
+    return {"count": len(out), "papers": out}
+
+
+@app.get("/ui/pairs")
+def ui_pairs():
+    with Session(engine) as s:
+        curves = s.exec(select(GraphCurve)).all()
+    counts = {}
+    for c in curves:
+        counts[(c.prop_x, c.prop_y)] = counts.get((c.prop_x, c.prop_y), 0) + 1
+    return {"pairs": [{"prop_x": x, "prop_y": y, "count": n}
+                      for (x, y), n in sorted(counts.items(), key=lambda kv: -kv[1])]}
+
+
+@app.get("/ui/graph")
+def ui_graph(prop_x: str, prop_y: str):
+    with Session(engine) as s:
+        rows = s.exec(select(GraphCurve).where(
+            GraphCurve.prop_x == prop_x, GraphCurve.prop_y == prop_y)).all()
+    return {"prop_x": prop_x, "prop_y": prop_y, "count": len(rows),
+            "unit_x": rows[0].unit_x if rows else "", "unit_y": rows[0].unit_y if rows else "",
+            "curves": [{"sid": r.record_sid, "doi": r.doi, "sample": r.sample_name,
+                        "composition": r.composition, "points": json.loads(r.points_json)}
+                       for r in rows]}
+
+
+# ---------------------------------------------------------------------------
+# Web UI (Starrydata-style: searchable database, explorer, record view).
+# ---------------------------------------------------------------------------
+from starrydata3.web import register_ui  # noqa: E402
+register_ui(app, engine, Record, GraphCurve, select, Session)
 
 
 # Create tables at import so every entrypoint (uvicorn, TestClient, gunicorn)
