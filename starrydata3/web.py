@@ -81,7 +81,8 @@ def layout(title, active, body, extra_js=""):
 <style>{CSS}</style></head><body>
 <header class="top"><div class="brand"><span class="star">&#9733;</span>Starrydata3</div>
 <nav>{nav}</nav><div class="sp">KMDS materials-data service</div></header>
-<main>{body}</main><script>{extra_js}</script></body></html>""")
+<main>{body}</main><script>{extra_js}</script></body></html>""",
+        headers={"Cache-Control": "no-store, must-revalidate", "Pragma": "no-cache"})
 
 
 # ---------------------------------------------------------------------------
