@@ -74,6 +74,7 @@ def layout(title, active, body, extra_js=""):
         f'<a href="{href}" class="{"on" if active==key else ""}">{label}</a>'
         for key, href, label in [("home", "/", "Database"),
                                   ("explore", "/explore", "Explore"),
+                                  ("upload", "/upload", "Upload"),
                                   ("api", "/docs", "API")])
     return HTMLResponse(f"""<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1"><title>{esc(title)} · Starrydata3</title>
@@ -175,10 +176,12 @@ function draw(){
   const comps=[...new Set(CUR.curves.map(c=>c.composition||c.sample))];
   const cmap={}; comps.forEach((c,i)=>cmap[c]=COL[i%COL.length]);
   CUR.curves.forEach(c=>{
-    g.strokeStyle=cmap[c.composition||c.sample];g.lineWidth=1.6;g.beginPath();
-    c.points.forEach((p,j)=>{const X=sx(p[0]),Y=sy(p[1]);j?g.lineTo(X,Y):g.moveTo(X,Y)});g.stroke();
-    g.fillStyle=cmap[c.composition||c.sample];
-    c.points.forEach((p,j)=>{if(j%3)return;g.beginPath();g.arc(sx(p[0]),sy(p[1]),1.6,0,7);g.fill()});
+    const col=cmap[c.composition||c.sample];
+    const sp=[...c.points].sort((a,b)=>a[0]-b[0]);   // draw line in x order (no zig-zag)
+    g.strokeStyle=col;g.lineWidth=1.6;g.beginPath();
+    sp.forEach((p,j)=>{const X=sx(p[0]),Y=sy(p[1]);j?g.lineTo(X,Y):g.moveTo(X,Y)});g.stroke();
+    g.fillStyle=col;
+    sp.forEach((p,j)=>{if(j%3)return;g.beginPath();g.arc(sx(p[0]),sy(p[1]),1.6,0,7);g.fill()});
   });
   document.getElementById('legend').innerHTML=comps.map(c=>
     `<span><i style="background:${cmap[c]}"></i>${esc(c)}</span>`).join('');
@@ -207,6 +210,65 @@ def explore_page():
     return layout("Explore", "explore", body, EXPLORE_JS)
 
 
+UPLOAD_JS = """
+const drop=document.getElementById('drop'), fileIn=document.getElementById('file');
+let RECORD=null, FNAME='';
+function esc(s){return (s+'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]))}
+function extract(text){
+  // accept a raw KMDS json OR an AutoLineDigitizer paper_record_view.html
+  const m=text.match(/window\\.__STUDIO_RECORD\\s*=\\s*(\\{[\\s\\S]*?\\});\\s*\\n/);
+  return JSON.parse(m?m[1]:text);
+}
+function show(){
+  const pub=(RECORD.metadata||{}).publication||{};
+  document.getElementById('info').innerHTML=
+    `<b>${esc(pub.title||'(untitled)')}</b><div class="muted small">DOI ${esc(pub.DOI||'—')} · `+
+    `${(pub.samples||[]).length} samples · ${(pub.figures||[]).length} figures · from ${esc(FNAME)}</div>`;
+  document.getElementById('go').disabled=false;
+}
+function read(f){FNAME=f.name; f.text().then(t=>{try{RECORD=extract(t);show();}
+  catch(e){document.getElementById('info').innerHTML='<span style="color:#c0392b">Could not parse: '+esc(e.message)+'</span>';}});}
+fileIn.addEventListener('change',e=>e.target.files[0]&&read(e.target.files[0]));
+['dragover','dragenter'].forEach(ev=>drop.addEventListener(ev,e=>{e.preventDefault();drop.style.borderColor='#1d5fa0';}));
+['dragleave','drop'].forEach(ev=>drop.addEventListener(ev,e=>{e.preventDefault();drop.style.borderColor='';}));
+drop.addEventListener('drop',e=>e.dataTransfer.files[0]&&read(e.dataTransfer.files[0]));
+document.getElementById('go').addEventListener('click',async()=>{
+  const key=document.getElementById('key').value.trim();
+  if(!key){alert('Enter your API key');return;}
+  const out=document.getElementById('out'); out.textContent='Uploading…';
+  const r=await fetch('/api/v1/records',{method:'POST',
+    headers:{'Content-Type':'application/json','X-API-Key':key},body:JSON.stringify(RECORD)});
+  const d=await r.json();
+  if(r.ok){out.innerHTML=`<div style="color:#27ae60">✓ Stored as <a href="/view/${d.sid}">SID-${d.sid}</a> — `+
+    `${d.curves_indexed} curves indexed, ${d.n_violations} schema note(s).</div>`;}
+  else{out.innerHTML='<span style="color:#c0392b">HTTP '+r.status+': '+esc(JSON.stringify(d.detail||d))+'</span>';}
+});
+"""
+
+
+def upload_page():
+    body = """
+<div class="card">
+  <h1>Upload a record</h1>
+  <p class="muted" style="margin-top:0">Drop a KMDS record (<code>.json</code>) or an
+  AutoLineDigitizer <code>paper_record_view.html</code>. It's validated against the KMDS
+  schema, stored, and its curves indexed.</p>
+  <div id="drop" style="border:2px dashed var(--line);border-radius:12px;padding:26px;text-align:center;
+    background:#f6faff;cursor:pointer" onclick="document.getElementById('file').click()">
+    <div style="font-size:26px">&#8681;</div>
+    <div>Drop file here, or <b style="color:var(--blue)">choose file</b></div>
+    <input type="file" id="file" accept=".json,.html" style="display:none">
+  </div>
+  <div id="info" style="margin:14px 0"></div>
+  <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+    <input class="search" id="key" placeholder="API key (sd3_…)" style="max-width:420px" type="password">
+    <button id="go" disabled class="pairbtn on" style="cursor:pointer">Upload to database</button>
+  </div>
+  <div id="out" style="margin-top:14px"></div>
+</div>"""
+    return layout("Upload", "upload", body, UPLOAD_JS)
+
+
 def _svg_plot(curves):
     pts = [p for c in curves for p in c["points"]]
     if not pts:
@@ -219,7 +281,8 @@ def _svg_plot(curves):
     marks, leg = [], []
     for i, c in enumerate(curves):
         col = PALETTE[i % len(PALETTE)]
-        poly = " ".join(f"{sx(p[0]):.1f},{sy(p[1]):.1f}" for p in c["points"])
+        sp = sorted(c["points"], key=lambda p: p[0])   # x order, no zig-zag
+        poly = " ".join(f"{sx(p[0]):.1f},{sy(p[1]):.1f}" for p in sp)
         marks.append(f'<polyline points="{poly}" fill="none" stroke="{col}" stroke-width="1.5"/>')
         leg.append(f'<span><i style="background:{col}"></i>{esc(c["sample"])}</span>')
     fmt = lambda v: (f"{v:.2e}" if v and (abs(v) < 0.01 or abs(v) >= 1e4) else f"{v:.4g}")
@@ -280,6 +343,10 @@ def register_ui(app, engine, Record, GraphCurve, select, Session):
     @app.get("/explore", response_class=HTMLResponse)
     def _explore():
         return explore_page()
+
+    @app.get("/upload", response_class=HTMLResponse)
+    def _upload():
+        return upload_page()
 
     @app.get("/ui/record/{sid}")
     def _raw(sid: int):

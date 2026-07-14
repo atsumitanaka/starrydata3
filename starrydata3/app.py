@@ -200,6 +200,25 @@ def _contain(dig, donor):
     return max(0.0, min(b, d) - max(a, c)) / (b - a)
 
 
+_UNIT_TEX = [(r"\^\{\\circ\}\s*C", "°C"), (r"\\circ", "°"), (r"\\Omega", "Ω"),
+             (r"\\cdot", "·"), (r"\\times", "×"), (r"\\mu", "µ"), (r"\\Delta", "Δ")]
+
+
+def sanitize_unit(unit: Optional[str]) -> str:
+    """KMDS units carry LaTeX ('mA\\ h\\ g^{-1}', '^{\\circ}C', '\\Omega'); make
+    them plain text for storage + display."""
+    import re
+    u = unit or "-"
+    for pat, rep in _UNIT_TEX:
+        u = re.sub(pat, rep, u)
+    u = re.sub(r"\^\{([^}]*)\}", r"^\1", u)
+    u = re.sub(r"_\{([^}]*)\}", r"_\1", u)
+    u = u.replace("\\ ", " ").replace("\\,", " ")
+    u = u.replace("{", "").replace("}", "").replace("\\", "")
+    u = re.sub(r"\s+", " ", u).strip()
+    return u or "-"
+
+
 def _collect_donors(pub):
     donors = []
     for fig in pub.get("figures") or []:
@@ -287,7 +306,8 @@ def extract_curves(record: Dict[str, Any]) -> List[Dict[str, Any]]:
                     comp = sname
                 curves.append({"sample_name": sname, "composition": comp,
                                "prop_x": xt, "prop_y": yt,
-                               "unit_x": xa.get("unit") or "-", "unit_y": ya.get("unit") or "-",
+                               "unit_x": sanitize_unit(xa.get("unit")),
+                               "unit_y": sanitize_unit(ya.get("unit")),
                                "points": pts})
     return curves
 
