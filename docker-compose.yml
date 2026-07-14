@@ -1,0 +1,12 @@
+services:
+  starrydata3:
+    build: .
+    ports:
+      - "8300:8300"
+    volumes:
+      - sd3-data:/data
+    restart: unless-stopped
+    environment:
+      - SD3_DB=/data/starrydata3.db
+volumes:
+  sd3-data:
