@@ -454,10 +454,29 @@ def ui_stats():
             "points": sum(c.n_points for c in curves)}
 
 
+_ELEMENTS = set(("H He Li Be B C N O F Ne Na Mg Al Si P S Cl Ar K Ca Sc Ti V Cr Mn "
+    "Fe Co Ni Cu Zn Ga Ge As Se Br Kr Rb Sr Y Zr Nb Mo Tc Ru Rh Pd Ag Cd In Sn Sb Te "
+    "I Xe Cs Ba La Ce Pr Nd Pm Sm Eu Gd Tb Dy Ho Er Tm Yb Lu Hf Ta W Re Os Ir Pt Au Hg "
+    "Tl Pb Bi Po At Rn Fr Ra Ac Th Pa U Np Pu").split())
+
+
+def _atoms_in(text):
+    import re
+    return set(re.findall(r"[A-Z][a-z]?", text or ""))
+
+
 @app.get("/ui/papers")
-def ui_papers(q: str = ""):
-    """Paper list with a free-text filter over title / DOI / composition / property."""
+def ui_papers(q: str = "", atom: str = ""):
+    """Paper list filtered by free text (title/DOI/composition/property) and/or
+    by required elements — `atom=Bi,Te` keeps papers whose compositions contain
+    ALL those elements (mirrors Starrydata's atom search). An all-element query
+    in `q` (e.g. 'Bi Te') is auto-detected as an atom search too."""
     ql = q.strip().lower()
+    want_atoms = {a for a in _atoms_in(atom.replace(",", " ")) if a in _ELEMENTS}
+    if not want_atoms and q:
+        toks = [t for t in q.replace(",", " ").split() if t]
+        if toks and all(t in _ELEMENTS for t in toks):
+            want_atoms = set(toks); ql = ""     # pure-element query -> atom search
     with Session(engine) as s:
         recs = s.exec(select(Record)).all()
         curves = s.exec(select(GraphCurve)).all()
@@ -471,6 +490,10 @@ def ui_papers(q: str = ""):
     out = []
     for r in recs:
         info = by_sid.get(r.sid, {"n": 0, "comps": set(), "props": set()})
+        if want_atoms:
+            comp_atoms = set().union(*[_atoms_in(c) for c in info["comps"]]) if info["comps"] else set()
+            if not want_atoms.issubset(comp_atoms):
+                continue
         hay = " ".join([r.title, r.doi, " ".join(info["comps"]), " ".join(info["props"])]).lower()
         if ql and ql not in hay:
             continue

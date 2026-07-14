@@ -115,7 +115,7 @@ def home_page():
 <div class="card">
   <h1>Paper database</h1>
   <p class="muted" style="margin-top:0">Search by title, DOI, composition, or property.</p>
-  <input class="search" id="q" placeholder="Search papers…  e.g. TaFeSb, ZT, dielectric, 10.1021/…">
+  <input class="search" id="q" placeholder="Search papers…  title · DOI · property · or elements (Bi Te)">
   <div class="muted small" style="margin:8px 2px" id="count"></div>
   <table><thead><tr><th>ID</th><th>Paper</th><th>Samples</th><th>Curves</th></tr></thead>
   <tbody id="rows"></tbody></table>
