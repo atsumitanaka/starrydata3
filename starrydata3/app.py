@@ -186,18 +186,19 @@ def _norm_prop(s: str) -> str:
     return re.sub(r"[^a-z0-9]+", " ", (s or "").lower()).strip()
 
 
-# hand synonyms: raw axis/OCR wording -> canonical KMDS term
+# Hand synonyms: alternate wording -> a term that is ACTUALLY in the KMDS
+# vocabulary. Every target here is verified to exist; we never self-map a term
+# just to make it look conformant. Independent variables that KMDS's
+# material-property vocabulary does not define (frequency, voltage, capacity,
+# time, cycle number, ...) are intentionally absent, so they stay flagged.
 _PROP_SYNONYMS = {
-    "specific capacity": "specific capacity", "capacity": "capacity",
-    "voltage": "voltage", "cell voltage": "voltage", "potential": "voltage",
-    "temperature": "temperature", "temp": "temperature",
+    "temp": "temperature",
     "seebeck": "Seebeck coefficient", "thermopower": "Seebeck coefficient",
-    "resistivity": "electrical resistivity", "conductivity": "electrical conductivity",
-    "thermal conductivity": "thermal conductivity", "zt": "ZT", "figure of merit": "ZT",
-    "power factor": "power factor", "frequency": "frequency",
-    "dielectric constant": "dielectric constant", "permittivity": "dielectric constant",
-    "loss tangent": "loss tangent", "dielectric loss": "dielectric loss tangent",
-    "storage modulus": "storage modulus", "loss modulus": "loss modulus",
+    "seebeck coeff": "Seebeck coefficient",
+    "figure of merit": "ZT", "thermoelectric figure of merit": "ZT",
+    "permittivity": "dielectric constant", "relative permittivity": "dielectric constant",
+    "dielectric loss": "loss tangent", "loss factor": "loss tangent",
+    "tan delta": "loss tangent", "dissipation factor": "loss tangent",
 }
 
 
