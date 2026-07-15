@@ -52,7 +52,10 @@ def property_vocab_from_kmds(schema_path):
             if isinstance(val, dict) and is_array and "items" in val:
                 collect(val["items"], name)                 # value-array group
             elif not cp or set(cp).issubset(_WRAPPER_KEYS):
-                unit = child.get("unit") or (cp.get("value", {}) or {}).get("unit", "")
+                vnode = cp.get("value") if isinstance(cp.get("value"), dict) else {}
+                # KMDS states the canonical unit in the leaf's value.examples
+                unit = (child.get("unit") or vnode.get("unit")
+                        or vnode.get("examples") or "")
                 out.append((name, category, unit))           # property leaf
             else:
                 collect(child, name)                         # nested sub-group
@@ -72,6 +75,7 @@ def cmd_initdb(_):
 
 
 def cmd_seedprops(args):
+    from starrydata3.units import _clean
     path = args.schema or SCHEMA_PATH
     vocab = property_vocab_from_kmds(path)
     init_db()
@@ -81,7 +85,9 @@ def cmd_seedprops(args):
         for name, cat, unit in vocab:
             if name in have:
                 continue
-            s.add(Property(name=name, category=cat, default_unit=unit))
+            cu = _clean(unit)
+            cu = "" if cu.lower() in ("none", "-") else cu   # dimensionless
+            s.add(Property(name=name, category=cat, default_unit=cu))
             added += 1
         s.commit()
     print(f"✓ seeded {added} properties (from {os.path.basename(path)}); "

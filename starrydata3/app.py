@@ -29,6 +29,8 @@ from fastapi import Body, Depends, FastAPI, Header, HTTPException
 from fastapi.responses import HTMLResponse
 from sqlmodel import Field, Session, SQLModel, create_engine, select
 
+from starrydata3 import units
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 DB_PATH = os.environ.get("SD3_DB", os.path.join(ROOT, "starrydata3.db"))
@@ -131,9 +133,11 @@ class GraphCurve(SQLModel, table=True):
     prop_y: str = Field(default="", index=True)
     unit_x: str = ""
     unit_y: str = ""
-    points_json: str = "[]"
+    points_json: str = "[]"       # points normalized to canonical KMDS units
+    raw_points_json: str = "[]"   # original values as digitized
     n_points: int = 0
     kmds: bool = True          # both axis properties are in the KMDS vocabulary
+    unit_normalized: bool = False  # x and/or y were converted to canonical units
 
 
 class Property(SQLModel, table=True):
@@ -411,12 +415,14 @@ def submit_record(record: Dict[str, Any] = Body(...),
         for old in s.exec(select(GraphCurve).where(GraphCurve.record_sid == sid)).all():
             s.delete(old)
         curves = extract_curves(record)
-        # normalize each curve's axis properties to the KMDS vocabulary; keep the
-        # raw term when it is not a KMDS property but flag it so it can't
-        # silently pollute the database.
-        vocab_norm = {_norm_prop(p.name): p.name for p in s.exec(select(Property)).all()}
+        # normalize axis properties to the KMDS vocabulary + convert values to
+        # each property's canonical KMDS unit (data unification). Keep raw term
+        # / raw values + flags where a match or conversion isn't possible.
+        props = s.exec(select(Property)).all()
+        vocab_norm = {_norm_prop(p.name): p.name for p in props}
+        canon_unit = {p.name: (p.default_unit or "") for p in props}
         non_kmds = set()
-        n_kmds = 0
+        n_kmds = n_norm = 0
         for c in curves:
             cx = match_property(c["prop_x"], vocab_norm)
             cy = match_property(c["prop_y"], vocab_norm)
@@ -425,18 +431,39 @@ def submit_record(record: Dict[str, Any] = Body(...),
             if cy is None:
                 non_kmds.add(c["prop_y"])
             is_kmds = cx is not None and cy is not None
+
+            ux, uy = c["unit_x"], c["unit_y"]
+            fx, fy = 1.0, 1.0
+            normed = False
+            if cx is not None and canon_unit.get(cx):
+                f, ok = units.convert_factor(ux, canon_unit[cx])
+                if ok and f is not None and f != 1.0:
+                    fx = f; ux = canon_unit[cx]; normed = True
+                elif ok:
+                    ux = canon_unit[cx]
+            if cy is not None and canon_unit.get(cy):
+                f, ok = units.convert_factor(uy, canon_unit[cy])
+                if ok and f is not None and f != 1.0:
+                    fy = f; uy = canon_unit[cy]; normed = True
+                elif ok:
+                    uy = canon_unit[cy]
+            raw = c["points"]
+            pts = ([[p[0] * fx, p[1] * fy] for p in raw]
+                   if (fx != 1.0 or fy != 1.0) else raw)
             n_kmds += 1 if is_kmds else 0
+            n_norm += 1 if normed else 0
             s.add(GraphCurve(record_sid=sid, doi=doi, sample_name=c["sample_name"],
                              composition=c["composition"],
                              prop_x=cx or c["prop_x"], prop_y=cy or c["prop_y"],
-                             unit_x=c["unit_x"], unit_y=c["unit_y"], kmds=is_kmds,
-                             points_json=json.dumps(c["points"]), n_points=len(c["points"])))
+                             unit_x=ux, unit_y=uy, kmds=is_kmds, unit_normalized=normed,
+                             points_json=json.dumps(pts), raw_points_json=json.dumps(raw),
+                             n_points=len(pts)))
         s.commit()
 
     return {"ok": True, "sid": sid, "doi": doi, "title": title,
             "n_violations": len(viol), "violations": viol[:20],
             "curves_indexed": len(curves),
-            "kmds_curves": n_kmds,
+            "kmds_curves": n_kmds, "unit_normalized_curves": n_norm,
             "non_kmds_properties": sorted(non_kmds)}
 
 
