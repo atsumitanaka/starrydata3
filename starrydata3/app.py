@@ -133,6 +133,7 @@ class GraphCurve(SQLModel, table=True):
     unit_y: str = ""
     points_json: str = "[]"
     n_points: int = 0
+    kmds: bool = True          # both axis properties are in the KMDS vocabulary
 
 
 class Property(SQLModel, table=True):
@@ -178,6 +179,42 @@ def require_scope(min_scope: str):
 
 def _publication(record: Dict[str, Any]) -> Dict[str, Any]:
     return (record.get("metadata") or {}).get("publication") or {}
+
+
+def _norm_prop(s: str) -> str:
+    import re
+    return re.sub(r"[^a-z0-9]+", " ", (s or "").lower()).strip()
+
+
+# hand synonyms: raw axis/OCR wording -> canonical KMDS term
+_PROP_SYNONYMS = {
+    "specific capacity": "specific capacity", "capacity": "capacity",
+    "voltage": "voltage", "cell voltage": "voltage", "potential": "voltage",
+    "temperature": "temperature", "temp": "temperature",
+    "seebeck": "Seebeck coefficient", "thermopower": "Seebeck coefficient",
+    "resistivity": "electrical resistivity", "conductivity": "electrical conductivity",
+    "thermal conductivity": "thermal conductivity", "zt": "ZT", "figure of merit": "ZT",
+    "power factor": "power factor", "frequency": "frequency",
+    "dielectric constant": "dielectric constant", "permittivity": "dielectric constant",
+    "loss tangent": "loss tangent", "dielectric loss": "dielectric loss tangent",
+    "storage modulus": "storage modulus", "loss modulus": "loss modulus",
+}
+
+
+def match_property(name: str, vocab_norm: Dict[str, str]) -> Optional[str]:
+    """Map an axis/OCR property name onto a canonical KMDS vocabulary term.
+    Exact-normalized match, then a hand synonym, then a unique substring hit.
+    Returns the canonical term, or None if it is not a KMDS property."""
+    n = _norm_prop(name)
+    if not n:
+        return None
+    if n in vocab_norm:
+        return vocab_norm[n]
+    syn = _PROP_SYNONYMS.get(n)
+    if syn:
+        return syn
+    hits = [canon for k, canon in vocab_norm.items() if n == k or (len(n) > 4 and n in k)]
+    return hits[0] if len(set(hits)) == 1 else None
 
 
 def _placeholder(term: Optional[str]) -> bool:
@@ -373,16 +410,33 @@ def submit_record(record: Dict[str, Any] = Body(...),
         for old in s.exec(select(GraphCurve).where(GraphCurve.record_sid == sid)).all():
             s.delete(old)
         curves = extract_curves(record)
+        # normalize each curve's axis properties to the KMDS vocabulary; keep the
+        # raw term when it is not a KMDS property but flag it so it can't
+        # silently pollute the database.
+        vocab_norm = {_norm_prop(p.name): p.name for p in s.exec(select(Property)).all()}
+        non_kmds = set()
+        n_kmds = 0
         for c in curves:
+            cx = match_property(c["prop_x"], vocab_norm)
+            cy = match_property(c["prop_y"], vocab_norm)
+            if cx is None:
+                non_kmds.add(c["prop_x"])
+            if cy is None:
+                non_kmds.add(c["prop_y"])
+            is_kmds = cx is not None and cy is not None
+            n_kmds += 1 if is_kmds else 0
             s.add(GraphCurve(record_sid=sid, doi=doi, sample_name=c["sample_name"],
-                             composition=c["composition"], prop_x=c["prop_x"], prop_y=c["prop_y"],
-                             unit_x=c["unit_x"], unit_y=c["unit_y"],
+                             composition=c["composition"],
+                             prop_x=cx or c["prop_x"], prop_y=cy or c["prop_y"],
+                             unit_x=c["unit_x"], unit_y=c["unit_y"], kmds=is_kmds,
                              points_json=json.dumps(c["points"]), n_points=len(c["points"])))
         s.commit()
 
     return {"ok": True, "sid": sid, "doi": doi, "title": title,
             "n_violations": len(viol), "violations": viol[:20],
-            "curves_indexed": len(curves)}
+            "curves_indexed": len(curves),
+            "kmds_curves": n_kmds,
+            "non_kmds_properties": sorted(non_kmds)}
 
 
 @app.get("/api/v1/records")
@@ -511,9 +565,12 @@ def ui_pairs():
         curves = s.exec(select(GraphCurve)).all()
     counts = {}
     for c in curves:
-        counts[(c.prop_x, c.prop_y)] = counts.get((c.prop_x, c.prop_y), 0) + 1
-    return {"pairs": [{"prop_x": x, "prop_y": y, "count": n}
-                      for (x, y), n in sorted(counts.items(), key=lambda kv: -kv[1])]}
+        d = counts.setdefault((c.prop_x, c.prop_y), {"n": 0, "kmds": True})
+        d["n"] += 1
+        if not c.kmds:
+            d["kmds"] = False
+    return {"pairs": [{"prop_x": x, "prop_y": y, "count": d["n"], "kmds": d["kmds"]}
+                      for (x, y), d in sorted(counts.items(), key=lambda kv: -kv[1]["n"])]}
 
 
 @app.get("/ui/graph")

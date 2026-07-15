@@ -85,14 +85,16 @@ def test_submit_and_query(client, wkey, rkey):
     assert r.status_code == 200
     assert r.json()["metadata"]["publication"]["DOI"] == "10.1234/test.001"
 
-    # property-pair query returns the curve with real points
-    r = client.get("/api/v1/graphs", params={"prop_x": "Temperature", "prop_y": "ZT"},
+    # property-pair query returns the curve with real points (props are
+    # normalized to the canonical KMDS vocabulary term, e.g. Temperature->temperature)
+    r = client.get("/api/v1/graphs", params={"prop_x": "temperature", "prop_y": "ZT"},
                    headers={"X-API-Key": rkey})
     assert r.status_code == 200
     g = r.json()
     assert g["count"] == 1
     assert g["curves"][0]["composition"] == "TaFeSb"
     assert g["curves"][0]["points"][0] == [300, 0.2]
+    assert body["kmds_curves"] == 1 and body["non_kmds_properties"] == []
 
 
 def test_upsert_by_doi(client, wkey):

@@ -139,7 +139,8 @@ function esc(s){return (s+'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':
 async function init(){
   PAIRS=(await (await fetch('/ui/pairs')).json()).pairs;
   document.getElementById('pairs').innerHTML = PAIRS.map((p,i)=>
-    `<button class="pairbtn" data-i="${i}" onclick="pick(${i})">${esc(p.prop_x)} vs ${esc(p.prop_y)}<span class="n">${p.count}</span></button>`).join('');
+    `<button class="pairbtn" data-i="${i}" onclick="pick(${i})">${esc(p.prop_x)} vs ${esc(p.prop_y)}`+
+    `<span class="n">${p.count}</span>${p.kmds?'':' <span title="not in KMDS vocabulary" style="color:#c0392b">&#9888;</span>'}</button>`).join('');
   if(PAIRS.length) pick(0);
 }
 async function pick(i){
