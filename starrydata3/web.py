@@ -74,6 +74,7 @@ def layout(title, active, body, extra_js=""):
         f'<a href="{href}" class="{"on" if active==key else ""}">{label}</a>'
         for key, href, label in [("home", "/", "Database"),
                                   ("explore", "/explore", "Explore"),
+                                  ("digitize", "/digitize", "Digitize PDF"),
                                   ("upload", "/upload", "Upload"),
                                   ("api", "/docs", "API")])
     return HTMLResponse(f"""<!doctype html><html lang="en"><head><meta charset="utf-8">
@@ -279,6 +280,58 @@ def upload_page():
     return layout("Upload", "upload", body, UPLOAD_JS)
 
 
+DIGITIZE_JS = """
+const f=document.getElementById('pdf'), keyIn=document.getElementById('key');
+const out=document.getElementById('out'), go=document.getElementById('go');
+function esc(s){return (s+'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]))}
+go.addEventListener('click', async ()=>{
+  const key=keyIn.value.trim();
+  if(!f.files[0]){alert('Choose a PDF');return;}
+  if(!key){alert('Enter your API key');return;}
+  go.disabled=true; out.innerHTML='Uploading PDF…';
+  const fd=new FormData(); fd.append('file', f.files[0]);
+  let r;
+  try{ r=await fetch('/api/v1/process_pdf',{method:'POST',headers:{'X-API-Key':key},body:fd}); }
+  catch(e){ out.innerHTML='<span style=color:#c0392b>network error</span>'; go.disabled=false; return; }
+  const d=await r.json();
+  if(!r.ok){ out.innerHTML='<span style=color:#c0392b>HTTP '+r.status+': '+esc(JSON.stringify(d.detail||d))+'</span>'; go.disabled=false; return; }
+  const job=d.job_id;
+  out.innerHTML='Digitizing… <span class=muted id=stg></span>';
+  const poll=setInterval(async ()=>{
+    const jr=await fetch('/api/v1/jobs/'+job,{headers:{'X-API-Key':key}});
+    const j=await jr.json();
+    document.getElementById('stg') && (document.getElementById('stg').textContent=j.stage||'');
+    if(j.status==='done'){ clearInterval(poll); go.disabled=false;
+      const res=j.result||{};
+      out.innerHTML='<div style=color:#27ae60>✓ Digitized → <a href="/view/'+j.sid+'">SID-'+j.sid+'</a> — '+
+        (res.curves_indexed||0)+' curves, '+(res.kmds_curves||0)+' KMDS-conformant.</div>'; }
+    else if(j.status==='error'){ clearInterval(poll); go.disabled=false;
+      out.innerHTML='<span style=color:#c0392b>Failed: '+esc(j.error||'')+'</span>'; }
+  }, 1500);
+});
+"""
+
+
+def digitize_page():
+    body = """
+<div class="card">
+  <h1>Digitize a paper</h1>
+  <p class="muted" style="margin-top:0">Upload a PDF — the server extracts every
+  figure, calibrates axes, digitizes the curves, names them from the legend, and
+  stores the result. (Runs the AutoLineDigitizer engine; first PDF loads the
+  models, so it can take a minute.)</p>
+  <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:12px 0">
+    <input type="file" id="pdf" accept="application/pdf">
+    <input class="search" id="key" placeholder="API key (sd3_…)" style="max-width:360px" type="password">
+    <button id="go" class="pairbtn on" style="cursor:pointer">Digitize</button>
+  </div>
+  <div id="out"></div>
+</div>
+<div class="card muted small">Every digitized curve still gets validated against the
+KMDS vocabulary and unit-normalized on ingest, same as a direct upload.</div>"""
+    return layout("Digitize", "digitize", body, DIGITIZE_JS)
+
+
 def _svg_plot(curves):
     pts = [p for c in curves for p in c["points"]]
     if not pts:
@@ -370,6 +423,10 @@ def register_ui(app, engine, Record, GraphCurve, select, Session):
     @app.get("/upload", response_class=HTMLResponse)
     def _upload():
         return upload_page()
+
+    @app.get("/digitize", response_class=HTMLResponse)
+    def _digitize():
+        return digitize_page()
 
     @app.get("/ui/record/{sid}")
     def _raw(sid: int):

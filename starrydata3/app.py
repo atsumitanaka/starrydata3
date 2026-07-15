@@ -25,7 +25,7 @@ from datetime import datetime, timezone
 from functools import lru_cache
 from typing import Any, Dict, List, Optional
 
-from fastapi import Body, Depends, FastAPI, Header, HTTPException
+from fastapi import Body, Depends, FastAPI, File, Header, HTTPException, UploadFile
 from fastapi.responses import HTMLResponse
 from sqlmodel import Field, Session, SQLModel, create_engine, select
 
@@ -383,12 +383,10 @@ def validate_only(record: Dict[str, Any] = Body(...),
             "n_curves": len(extract_curves(record))}
 
 
-@app.post("/api/v1/records")
-def submit_record(record: Dict[str, Any] = Body(...),
-                  strict: bool = False,
-                  key: APIKey = Depends(require_scope("write"))):
-    """Ingest a full KMDS record: validate, upsert by DOI, index its curves.
-    strict=true rejects a record with any schema violation (422)."""
+def store_record(record: Dict[str, Any], strict: bool = False) -> Dict[str, Any]:
+    """Core ingest (no auth): validate, upsert by DOI, normalize + index curves.
+    Shared by the /records endpoint and the PDF pipeline. Raises HTTPException
+    on a missing DOI or (when strict) schema violations."""
     pub = _publication(record)
     doi = (pub.get("DOI") or "").strip()
     if not doi:
@@ -465,6 +463,72 @@ def submit_record(record: Dict[str, Any] = Body(...),
             "curves_indexed": len(curves),
             "kmds_curves": n_kmds, "unit_normalized_curves": n_norm,
             "non_kmds_properties": sorted(non_kmds)}
+
+
+@app.post("/api/v1/records")
+def submit_record(record: Dict[str, Any] = Body(...),
+                  strict: bool = False,
+                  key: APIKey = Depends(require_scope("write"))):
+    """Ingest a full KMDS record: validate, upsert by DOI, index its curves.
+    strict=true rejects a record with any schema violation (422)."""
+    return store_record(record, strict=strict)
+
+
+# ---------------------------------------------------------------------------
+# Server-side digitization: upload a PDF, run the AutoLineDigitizer pipeline,
+# store the resulting KMDS record. Background job + status polling.
+# ---------------------------------------------------------------------------
+_JOBS: Dict[str, Dict[str, Any]] = {}
+
+
+@app.post("/api/v1/process_pdf")
+def process_pdf(file: UploadFile = File(...), doi: str = "",
+                key: APIKey = Depends(require_scope("write"))):
+    """Digitize an uploaded PDF end-to-end (figures → calibrate → curves →
+    legend → store) using the AutoLineDigitizer engine. Returns a job id;
+    poll /api/v1/jobs/{id}."""
+    import shutil
+    import tempfile
+    import threading
+    from starrydata3 import pipeline
+    if not pipeline.pipeline_available():
+        raise HTTPException(503, "digitization pipeline unavailable — run "
+                            "Starrydata3 from the alddev env with $ALD_SRC set")
+    job_id = secrets.token_hex(8)
+    tmp = tempfile.mkdtemp(prefix="sd3_pdf_")
+    path = os.path.join(tmp, os.path.basename(file.filename or "paper.pdf"))
+    with open(path, "wb") as f:
+        f.write(file.file.read())
+    _JOBS[job_id] = {"status": "running", "stage": "loading models",
+                     "sid": None, "error": None}
+
+    def _run():
+        try:
+            def prog(msg):
+                _JOBS[job_id]["stage"] = msg
+            rec = pipeline.get_pipeline().process_pdf(path, doi=doi or None, progress=prog)
+            _JOBS[job_id]["stage"] = "storing"
+            res = store_record(rec)
+            _JOBS[job_id].update(status="done", sid=res["sid"], result=res)
+        except HTTPException as e:
+            _JOBS[job_id].update(status="error", error=str(e.detail))
+        except Exception as e:  # noqa: BLE001
+            import traceback
+            traceback.print_exc()
+            _JOBS[job_id].update(status="error", error=f"{type(e).__name__}: {e}")
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    threading.Thread(target=_run, daemon=True).start()
+    return {"job_id": job_id, "status": "running"}
+
+
+@app.get("/api/v1/jobs/{job_id}")
+def job_status(job_id: str, key: APIKey = Depends(require_scope("read"))):
+    j = _JOBS.get(job_id)
+    if not j:
+        raise HTTPException(404, "no such job")
+    return j
 
 
 @app.get("/api/v1/records")
