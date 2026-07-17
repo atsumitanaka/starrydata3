@@ -140,6 +140,27 @@ class GraphCurve(SQLModel, table=True):
     unit_normalized: bool = False  # x and/or y were converted to canonical units
 
 
+class PointValue(SQLModel, table=True):
+    """A single measured property value, extracted from a record's material
+    property trees and data tables — the KMDS data most papers carry even when
+    nothing was digitized from a plot."""
+    id: Optional[int] = Field(default=None, primary_key=True)
+    record_sid: int = Field(index=True)
+    doi: str = Field(index=True)
+    entity: str = ""                 # the material / sample the value belongs to
+    source: str = "material"         # material (property tree) | table
+    prop: str = Field(default="", index=True)   # canonical KMDS term, or raw name
+    raw_prop: str = ""
+    category: str = ""               # KMDS property-tree branch, if known
+    value: float = 0.0               # in `unit` (canonical where convertible)
+    raw_value: float = 0.0
+    unit: str = ""
+    raw_unit: str = ""
+    env_temperature: Optional[float] = None      # measurement temperature, °C as recorded
+    kmds: bool = True
+    unit_normalized: bool = False
+
+
 class Property(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     name: str = Field(index=True, unique=True)
@@ -203,13 +224,26 @@ _PROP_SYNONYMS = {
     "permittivity": "dielectric constant", "relative permittivity": "dielectric constant",
     "dielectric loss": "loss tangent", "loss factor": "loss tangent",
     "tan delta": "loss tangent", "dissipation factor": "loss tangent",
+    "t g": "glass transition temperature", "tg": "glass transition temperature",
+    # battery axis wordings -> extension vocabulary terms (seeded from
+    # kmds_vocab_extensions.json; honestly categorized "(extension)")
+    "amphrs": "capacity", "amp hrs": "capacity", "amp hours": "capacity",
+    "ah": "capacity", "mah": "capacity", "amp hr": "capacity",
+    "volts": "voltage", "volt": "voltage", "cell voltage": "voltage", "discharge capacity": "capacity",
+    "charge capacity": "capacity",
+    "ic": "incremental capacity", "dq dv": "incremental capacity",
+    "dqdv": "incremental capacity", "power output": "output power",
+    "delta t": "temperature difference",
 }
 
 
-def match_property(name: str, vocab_norm: Dict[str, str]) -> Optional[str]:
+def match_property(name: str, vocab_norm: Dict[str, str],
+                   unit: str = "") -> Optional[str]:
     """Map an axis/OCR property name onto a canonical KMDS vocabulary term.
     Exact-normalized match, then a hand synonym, then a unique substring hit.
+    The unit disambiguates single-letter symbols ('T' + kelvin -> temperature).
     Returns the canonical term, or None if it is not a KMDS property."""
+    import re
     n = _norm_prop(name)
     if not n:
         return None
@@ -218,6 +252,12 @@ def match_property(name: str, vocab_norm: Dict[str, str]) -> Optional[str]:
     syn = _PROP_SYNONYMS.get(n)
     if syn:
         return syn
+    # ΔT is temperature DIFFERENCE — check before the bare-T rule (the Δ is
+    # stripped by normalization, leaving a bare 't')
+    if re.match(r"^\s*(Δ|∆|[Dd]elta)\s*T\s*$", (name or "").strip()):
+        return vocab_norm.get("temperature difference")
+    if n == "t" and re.match(r"^\s*(K|°\s*C|deg\s*C|℃)\s*$", unit or ""):
+        return "temperature"
     hits = [canon for k, canon in vocab_norm.items() if n == k or (len(n) > 4 and n in k)]
     return hits[0] if len(set(hits)) == 1 else None
 
@@ -354,6 +394,113 @@ def extract_curves(record: Dict[str, Any]) -> List[Dict[str, Any]]:
     return curves
 
 
+def _value_leaves(node, path=()):
+    """Yield (path, value_obj) for every {"value": scalar, ...} leaf in a KMDS
+    material property tree. A value object is not recursed into (its
+    `measurement` block holds environment fields, not further properties)."""
+    if isinstance(node, dict):
+        if "value" in node and not isinstance(node.get("value"), (dict, list)):
+            yield path, node
+            return
+        for k, v in node.items():
+            yield from _value_leaves(v, path + (k,))
+    elif isinstance(node, list):
+        for x in node:
+            yield from _value_leaves(x, path)
+
+
+def _split_header_unit(header: str):
+    """'T_g (°C)' -> ('T_g', '°C'); also pulls a DMA-style measurement
+    temperature: \"E' at 30 °C (MPa)\" -> ('E\\'', 'MPa', 30.0)."""
+    import re
+    name, unit = header.strip(), ""
+    m = re.match(r"^(.*?)\s*\(([^()]*)\)\s*$", name)
+    if m:
+        name, unit = m.group(1).strip(), m.group(2).strip()
+    env_t = None
+    m = re.search(r"\bat\s+(-?\d+(?:\.\d+)?)\s*°?\s*C\b", name)
+    if m:
+        env_t = float(m.group(1))
+        name = (name[:m.start()] + name[m.end():]).strip()
+    return name, unit, env_t
+
+
+# DMA notation used in table headers; targets verified in the KMDS vocabulary.
+_DMA_HEADER = {"E'": "storage modulus", "E''": "loss modulus"}
+
+
+def _caption_symbol_map(tbl: Dict[str, Any]) -> Dict[str, str]:
+    """Papers define their column symbols in the table caption — \"Young's
+    modulus (E) and Poisson's ratio (γ)\" — so a header symbol like 'E' or 'γ'
+    is resolved through the paper's OWN definition, never a guess."""
+    import re
+    text = " ".join([tbl.get("table name") or "", tbl.get("caption summary") or "",
+                     tbl.get("description") or ""])
+    out: Dict[str, str] = {}
+    for m in re.finditer(
+            r"([A-Za-zΑ-Ωα-ω'’′\- ]{4,}?)\s*\(\s*([^\s()]{1,6})\s*\)", text):
+        term = re.sub(r"^\s*(and|or|the|of|for)\s+", "", m.group(1), flags=re.I)
+        term = term.strip(" ,;.")
+        sym = m.group(2).strip()
+        if len(term) >= 4 and term.lower() != sym.lower():
+            out.setdefault(sym, term)
+    return out
+
+
+def extract_point_values(record: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Pull single measured values out of a KMDS record: (1) every value leaf
+    of each material's `property` tree, (2) every numeric cell of each data
+    table, keyed by the row's label column. These are what a paper contributes
+    when its plots were not digitized."""
+    out = []
+    for mat in record.get("materials") or []:
+        entity = mat.get("name") or mat.get("id") or ""
+        for path, vo in _value_leaves(mat.get("property") or {}):
+            val = vo.get("value")
+            if not isinstance(val, (int, float)):
+                continue
+            meas = vo.get("measurement") or []
+            env = (meas[0].get("analysis environment") or {}) if meas and isinstance(meas[0], dict) else {}
+            env_t = env.get("temperature")
+            out.append({"entity": entity, "source": "material",
+                        "raw_prop": path[-1] if path else "", "raw_unit": "",
+                        "category": path[0] if path else "",
+                        "value": float(val),
+                        "env_temperature": float(env_t) if isinstance(env_t, (int, float)) else None})
+
+    pub = _publication(record)
+    for tbl in pub.get("tables") or []:
+        headers = tbl.get("headers") or []
+        sym_map = _caption_symbol_map(tbl)
+        for row in tbl.get("rows") or []:
+            if not isinstance(row, (list, tuple)) or not row:
+                continue
+            entity = str(row[0])
+            for j, header in enumerate(headers[1:], start=1):
+                if j >= len(row) or not isinstance(row[j], (int, float)):
+                    continue
+                name, unit, env_t = _split_header_unit(str(header))
+                name = _DMA_HEADER.get(name) or sym_map.get(name) or name
+                out.append({"entity": entity, "source": "table",
+                            "raw_prop": name, "raw_unit": unit, "category": "",
+                            "value": float(row[j]), "env_temperature": env_t})
+    return out
+
+
+def _normalize_point(value: float, raw_unit: str, canon: str):
+    """(value, unit, normalized?) with the °C→K offset units.py can't express."""
+    if not canon:
+        return value, raw_unit, False
+    if not raw_unit:
+        return value, canon, False       # KMDS property trees imply canonical units
+    if canon == "K" and raw_unit.replace(" ", "") in ("°C", "C", "degC", "℃"):
+        return value + 273.15, "K", True
+    f, ok = units.convert_factor(raw_unit, canon)
+    if ok and f is not None:
+        return value * f, canon, f != 1.0
+    return value, raw_unit, False
+
+
 # ---------------------------------------------------------------------------
 # App
 # ---------------------------------------------------------------------------
@@ -422,8 +569,8 @@ def store_record(record: Dict[str, Any], strict: bool = False) -> Dict[str, Any]
         non_kmds = set()
         n_kmds = n_norm = 0
         for c in curves:
-            cx = match_property(c["prop_x"], vocab_norm)
-            cy = match_property(c["prop_y"], vocab_norm)
+            cx = match_property(c["prop_x"], vocab_norm, unit=c["unit_x"])
+            cy = match_property(c["prop_y"], vocab_norm, unit=c["unit_y"])
             if cx is None:
                 non_kmds.add(c["prop_x"])
             if cy is None:
@@ -456,13 +603,47 @@ def store_record(record: Dict[str, Any], strict: bool = False) -> Dict[str, Any]
                              unit_x=ux, unit_y=uy, kmds=is_kmds, unit_normalized=normed,
                              points_json=json.dumps(pts), raw_points_json=json.dumps(raw),
                              n_points=len(pts)))
+
+        # re-index single measured values (material property trees + tables)
+        for old in s.exec(select(PointValue).where(PointValue.record_sid == sid)).all():
+            s.delete(old)
+        pvs = extract_point_values(record)
+        n_kmds_pts = 0
+        for p in pvs:
+            cp = match_property(p["raw_prop"], vocab_norm, unit=p["raw_unit"])
+            if cp is None:
+                non_kmds.add(p["raw_prop"])
+            else:
+                n_kmds_pts += 1
+            val, unit, normed = _normalize_point(
+                p["value"], p["raw_unit"], canon_unit.get(cp or "", ""))
+            s.add(PointValue(record_sid=sid, doi=doi, entity=p["entity"],
+                             source=p["source"], prop=cp or p["raw_prop"],
+                             raw_prop=p["raw_prop"], category=p["category"],
+                             value=val, raw_value=p["value"], unit=unit,
+                             raw_unit=p["raw_unit"], env_temperature=p["env_temperature"],
+                             kmds=cp is not None, unit_normalized=normed))
         s.commit()
 
     return {"ok": True, "sid": sid, "doi": doi, "title": title,
             "n_violations": len(viol), "violations": viol[:20],
             "curves_indexed": len(curves),
             "kmds_curves": n_kmds, "unit_normalized_curves": n_norm,
+            "points_indexed": len(pvs), "kmds_points": n_kmds_pts,
             "non_kmds_properties": sorted(non_kmds)}
+
+
+def _digitization_stub(record: Dict[str, Any]) -> bool:
+    """A record that carries digitized curves but no publication metadata —
+    what the desktop app produces when no KMDS record was loaded. Uploading
+    one must enrich an existing stored record, never clobber it."""
+    pub = _publication(record)
+    has_dig = any(g.get("digitization_data")
+                  for f in pub.get("figures") or []
+                  for g in f.get("graphs") or [])
+    has_meta = bool(pub.get("title") or pub.get("abstract")
+                    or pub.get("samples") or record.get("materials"))
+    return has_dig and not has_meta
 
 
 @app.post("/api/v1/records")
@@ -470,7 +651,11 @@ def submit_record(record: Dict[str, Any] = Body(...),
                   strict: bool = False,
                   key: APIKey = Depends(require_scope("write"))):
     """Ingest a full KMDS record: validate, upsert by DOI, index its curves.
-    strict=true rejects a record with any schema violation (422)."""
+    strict=true rejects a record with any schema violation (422). A
+    digitization-only stub (curves, no metadata) whose DOI already exists is
+    MERGED into the stored record instead of replacing it."""
+    if _digitization_stub(record):
+        record = merge_digitized(record)
     return store_record(record, strict=strict)
 
 
@@ -508,7 +693,7 @@ def process_pdf(file: UploadFile = File(...), doi: str = "",
                 _JOBS[job_id]["stage"] = msg
             rec = pipeline.get_pipeline().process_pdf(path, doi=doi or None, progress=prog)
             _JOBS[job_id]["stage"] = "storing"
-            res = store_record(rec)
+            res = store_record(merge_digitized(rec))
             _JOBS[job_id].update(status="done", sid=res["sid"], result=res)
         except HTTPException as e:
             _JOBS[job_id].update(status="error", error=str(e.detail))
@@ -529,6 +714,236 @@ def job_status(job_id: str, key: APIKey = Depends(require_scope("read"))):
     if not j:
         raise HTTPException(404, "no such job")
     return j
+
+
+# ---------------------------------------------------------------------------
+# Interactive digitization with review: analyze a PDF, hold the per-figure
+# results in a session, let a human verify/correct every figure in the web UI,
+# then commit the approved figures as a KMDS record. Everything runs locally —
+# the ML weights live in the AutoLineDigitizer install on this machine.
+# ---------------------------------------------------------------------------
+_REVIEWS: Dict[str, Dict[str, Any]] = {}
+
+
+def merge_digitized(record: Dict[str, Any]) -> Dict[str, Any]:
+    """A digitization-only record whose DOI is already in the database is
+    GRAFTED into the stored record — its figures and samples are appended
+    (ids remapped to avoid collisions) so digitizing a paper's PDF enriches
+    the existing KMDS record instead of replacing it."""
+    pub = _publication(record)
+    doi = (pub.get("DOI") or "").strip()
+    if not doi:
+        return record
+    with Session(engine) as s:
+        rec = s.exec(select(Record).where(Record.doi == doi)).first()
+    if rec is None:
+        return record
+    existing = json.loads(rec.record_json)
+    epub = existing.setdefault("metadata", {}).setdefault("publication", {})
+
+    taken = {smp.get("sample local id") for smp in epub.get("samples") or []}
+    remap: Dict[str, str] = {}
+    n = 0
+    for smp in pub.get("samples") or []:
+        old = smp.get("sample local id")
+        new = old
+        while new in taken:
+            n += 1
+            new = f"s-d{n:02d}"
+        taken.add(new)
+        remap[old] = new
+        smp["sample local id"] = new
+    epub["samples"] = (epub.get("samples") or []) + (pub.get("samples") or [])
+
+    offset = len(epub.get("figures") or [])
+    for i, fig in enumerate(pub.get("figures") or [], start=1):
+        fig["figure local id"] = f"f-{offset + i:03d}"
+        for g in fig.get("graphs") or []:
+            g["samples"] = [remap.get(x, x) for x in (g.get("samples") or [])]
+    epub["figures"] = (epub.get("figures") or []) + (pub.get("figures") or [])
+    return existing
+
+
+@app.post("/api/v1/review/start")
+def review_start(file: UploadFile = File(...), doi: str = "",
+                 key: APIKey = Depends(require_scope("write"))):
+    """Digitize an uploaded PDF into a REVIEW SESSION (nothing stored yet).
+    Returns a job id; when the job is done it carries a review_id — fetch
+    /api/v1/review/{review_id} and render the verification UI."""
+    import shutil
+    import tempfile
+    import threading
+    from starrydata3 import pipeline
+    if not pipeline.pipeline_available():
+        raise HTTPException(503, "digitization pipeline unavailable — run "
+                            "Starrydata3 from the alddev env with $ALD_SRC set")
+    job_id = secrets.token_hex(8)
+    tmp = tempfile.mkdtemp(prefix="sd3_pdf_")
+    path = os.path.join(tmp, os.path.basename(file.filename or "paper.pdf"))
+    with open(path, "wb") as f:
+        f.write(file.file.read())
+    _JOBS[job_id] = {"status": "running", "stage": "loading models",
+                     "review_id": None, "error": None}
+
+    def _run():
+        try:
+            import cv2
+
+            def prog(msg):
+                _JOBS[job_id]["stage"] = msg
+            analysis = pipeline.get_pipeline().analyze_pdf(path, progress=prog)
+            rid = secrets.token_hex(12)
+            rdir = tempfile.mkdtemp(prefix="sd3_review_")
+            figures = []
+            for f in analysis["figures"]:
+                img = f.pop("image_bgr")
+                img_path = os.path.join(rdir, f"fig_{f['index']}.png")
+                cv2.imwrite(img_path, img)
+                f["width"], f["height"] = int(img.shape[1]), int(img.shape[0])
+                f["image_path"] = img_path
+                figures.append(f)
+            _REVIEWS[rid] = {"doi": doi or analysis["doi"] or "",
+                             "figures": figures, "dir": rdir, "created": _now()}
+            _JOBS[job_id].update(status="done", review_id=rid)
+        except Exception as e:  # noqa: BLE001
+            import traceback
+            traceback.print_exc()
+            _JOBS[job_id].update(status="error", error=f"{type(e).__name__}: {e}")
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    threading.Thread(target=_run, daemon=True).start()
+    return {"job_id": job_id, "status": "running"}
+
+
+def _review_or_404(rid: str) -> Dict[str, Any]:
+    r = _REVIEWS.get(rid)
+    if not r:
+        raise HTTPException(404, "no such review session (already committed or discarded?)")
+    return r
+
+
+def _series_range(s):
+    xs = [p[0] for p in s["points_data"]]
+    ys = [p[1] for p in s["points_data"]]
+    return {"x_min": min(xs), "x_max": max(xs), "y_min": min(ys), "y_max": max(ys)}
+
+
+@app.get("/api/v1/review/{rid}")
+def review_get(rid: str):
+    """The review session's figures for the verification UI. Curve points stay
+    server-side; the client sees overlay pixels, counts and DATA RANGES (the
+    ranges are how a reviewer spots a miscalibrated axis) and edits labels."""
+    r = _review_or_404(rid)
+    return {"review_id": rid, "doi": r["doi"], "created": r["created"],
+            "figures": [{
+                "index": f["index"], "caption": f["caption"],
+                "calibrated": f["calibrated"], "error": f.get("error", ""),
+                "calibration": f.get("calibration", "auto"),
+                "detector": f.get("detector", ""),
+                "x_name": f["x_name"], "y_name": f["y_name"],
+                "x_log": f["x_log"], "y_log": f["y_log"],
+                "width": f["width"], "height": f["height"],
+                "image_url": f"/api/v1/review/{rid}/figure/{f['index']}.png",
+                "series": [{"label": s["label"], "n_points": len(s["points_data"]),
+                            "range": _series_range(s),
+                            "points_px": s["points_px"]} for s in f["series"]],
+            } for f in r["figures"]]}
+
+
+@app.post("/api/v1/review/{rid}/recalibrate/{index}")
+def review_recalibrate(rid: str, index: int,
+                       key: APIKey = Depends(require_scope("write"))):
+    """Re-read this figure's axes with Claude (the 'detect axis' fix) and
+    recompute every series' data values from the stored pixel traces. For when
+    the classic calibration succeeded but read the ticks wrong (e.g. log-axis
+    labels like 10^2 digitized as 102)."""
+    import cv2
+    from starrydata3 import pipeline
+    r = _review_or_404(rid)
+    fig = next((f for f in r["figures"] if f["index"] == index), None)
+    if fig is None:
+        raise HTTPException(404, "no such figure")
+    img = cv2.imread(fig["image_path"])
+    if img is None:
+        raise HTTPException(500, "figure image missing from the session")
+    pl = pipeline.get_pipeline()
+    pl._ensure_models()
+    cfg = pl._claude_axis_fallback(img)
+    if not cfg:
+        raise HTTPException(502, "Claude could not calibrate this figure "
+                            "(is an Anthropic key configured?)")
+    for s in fig["series"]:
+        px = s.get("points_px_ds") or s["points_px"]
+        s["points_data"] = [list(pl.app.pixel_to_data_cfg(cfg, p[0], p[1])) for p in px]
+    fig.update(calibrated=True, calibration="claude",
+               x_log=bool(cfg.get("xIsLogScale")), y_log=bool(cfg.get("yIsLogScale")))
+    return {"ok": True, "index": index, "calibration": "claude",
+            "x_log": fig["x_log"], "y_log": fig["y_log"],
+            "series": [{"label": s["label"], "range": _series_range(s)}
+                       for s in fig["series"]]}
+
+
+@app.get("/api/v1/review/{rid}/figure/{index}.png")
+def review_figure(rid: str, index: int):
+    from fastapi.responses import FileResponse
+    r = _review_or_404(rid)
+    for f in r["figures"]:
+        if f["index"] == index:
+            return FileResponse(f["image_path"], media_type="image/png")
+    raise HTTPException(404, "no such figure")
+
+
+@app.post("/api/v1/review/{rid}/commit")
+def review_commit(rid: str, body: Dict[str, Any] = Body(...),
+                  key: APIKey = Depends(require_scope("write"))):
+    """Store the verified digitization as a KMDS record. Body: {doi, title,
+    figures: [{index, include, x_name, x_unit, y_name, y_unit, x_log, y_log,
+    series: [{label, include}]}]} — series points come from the session."""
+    import shutil
+    from starrydata3 import pipeline
+    r = _review_or_404(rid)
+    by_index = {f["index"]: f for f in r["figures"]}
+    payloads = []
+    for edit in body.get("figures") or []:
+        f = by_index.get(edit.get("index"))
+        if f is None or not edit.get("include") or not f["series"]:
+            continue
+        series = []
+        edits = edit.get("series") or []
+        for j, s in enumerate(f["series"]):
+            e = edits[j] if j < len(edits) else {}
+            if not e.get("include", True):
+                continue
+            series.append({"label": (e.get("label") or s["label"]).strip(),
+                           "points_data": s["points_data"]})
+        if not series:
+            continue
+        payloads.append({"caption": f["caption"],
+                         "x_name": (edit.get("x_name") or f["x_name"]).strip(),
+                         "y_name": (edit.get("y_name") or f["y_name"]).strip(),
+                         "x_unit": (edit.get("x_unit") or "").strip(),
+                         "y_unit": (edit.get("y_unit") or "").strip(),
+                         "x_log": bool(edit.get("x_log", f["x_log"])),
+                         "y_log": bool(edit.get("y_log", f["y_log"])),
+                         "series": series})
+    if not payloads:
+        raise HTTPException(422, "nothing to store — no figure was approved")
+    doi = (body.get("doi") or r["doi"] or "").strip()
+    record = pipeline.assemble_record(doi, payloads, title=(body.get("title") or "").strip())
+    res = store_record(merge_digitized(record))
+    shutil.rmtree(r["dir"], ignore_errors=True)
+    _REVIEWS.pop(rid, None)
+    return res
+
+
+@app.delete("/api/v1/review/{rid}")
+def review_discard(rid: str, key: APIKey = Depends(require_scope("write"))):
+    import shutil
+    r = _review_or_404(rid)
+    shutil.rmtree(r["dir"], ignore_errors=True)
+    _REVIEWS.pop(rid, None)
+    return {"ok": True, "discarded": rid}
 
 
 @app.get("/api/v1/records")
@@ -593,11 +1008,15 @@ def ui_stats():
         recs = s.exec(select(Record)).all()
         curves = s.exec(select(GraphCurve)).all()
         props = s.exec(select(Property)).all()
-    pairs = {(c.prop_x, c.prop_y) for c in curves}
+        pvs = s.exec(select(PointValue)).all()
+    pairs = {(c.prop_x, c.prop_y, c.unit_x, c.unit_y) for c in curves}
+    pairs |= {("temperature", p.prop, "K", p.unit) for p in pvs
+              if p.env_temperature is not None}
     comps = {c.composition for c in curves if c.composition}
+    comps |= {p.entity for p in pvs if p.entity}
     return {"records": len(recs), "curves": len(curves), "property_pairs": len(pairs),
             "compositions": len(comps), "vocabulary": len(props),
-            "points": sum(c.n_points for c in curves)}
+            "points": sum(c.n_points for c in curves) + len(pvs)}
 
 
 _ELEMENTS = set(("H He Li Be B C N O F Ne Na Mg Al Si P S Cl Ar K Ca Sc Ti V Cr Mn "
@@ -626,16 +1045,25 @@ def ui_papers(q: str = "", atom: str = ""):
     with Session(engine) as s:
         recs = s.exec(select(Record)).all()
         curves = s.exec(select(GraphCurve)).all()
+        pvs = s.exec(select(PointValue)).all()
     by_sid = {}
     for c in curves:
-        d = by_sid.setdefault(c.record_sid, {"n": 0, "comps": set(), "props": set()})
+        d = by_sid.setdefault(c.record_sid, {"n": 0, "pts": 0, "comps": set(), "props": set()})
         d["n"] += 1
         if c.composition:
             d["comps"].add(c.composition)
         d["props"].add(c.prop_x); d["props"].add(c.prop_y)
+    for p in pvs:
+        d = by_sid.setdefault(p.record_sid, {"n": 0, "pts": 0, "comps": set(), "props": set()})
+        d["pts"] += 1
+        if p.entity:
+            d["comps"].add(p.entity)
+        d["props"].add(p.prop)
     out = []
     for r in recs:
-        info = by_sid.get(r.sid, {"n": 0, "comps": set(), "props": set()})
+        info = by_sid.get(r.sid, {"n": 0, "pts": 0, "comps": set(), "props": set()})
+        pub = _publication(json.loads(r.record_json or "{}"))
+        n_samples = len(pub.get("samples") or []) or len(info["comps"])
         if want_atoms:
             comp_atoms = set().union(*[_atoms_in(c) for c in info["comps"]]) if info["comps"] else set()
             if not want_atoms.issubset(comp_atoms):
@@ -644,37 +1072,179 @@ def ui_papers(q: str = "", atom: str = ""):
         if ql and ql not in hay:
             continue
         out.append({"sid": r.sid, "doi": r.doi, "title": r.title,
-                    "curves": info["n"], "n_samples": len(info["comps"]),
+                    "curves": info["n"], "points": info["pts"], "n_samples": n_samples,
                     "compositions": sorted(info["comps"])[:6],
                     "properties": sorted(info["props"])})
-    out.sort(key=lambda x: -x["curves"])
+    out.sort(key=lambda x: -(x["curves"] + x["points"]))
     return {"count": len(out), "papers": out}
 
 
 @app.get("/ui/pairs")
 def ui_pairs():
+    """Property pairs are split by UNIT as well: a frequency sweep in Hz and
+    one in GHz are different axes, and without a canonical KMDS unit for the
+    property they must never be overlaid on one plot."""
     with Session(engine) as s:
         curves = s.exec(select(GraphCurve)).all()
+        pvs = s.exec(select(PointValue)).all()
     counts = {}
     for c in curves:
-        d = counts.setdefault((c.prop_x, c.prop_y), {"n": 0, "kmds": True})
+        d = counts.setdefault((c.prop_x, c.prop_y, c.unit_x, c.unit_y),
+                              {"n": 0, "kmds": True, "points": False})
         d["n"] += 1
         if not c.kmds:
             d["kmds"] = False
-    return {"pairs": [{"prop_x": x, "prop_y": y, "count": d["n"], "kmds": d["kmds"]}
-                      for (x, y), d in sorted(counts.items(), key=lambda kv: -kv[1]["n"])]}
+    for p in pvs:
+        if p.env_temperature is None:
+            continue
+        d = counts.setdefault(("temperature", p.prop, "K", p.unit),
+                              {"n": 0, "kmds": True, "points": False})
+        d["n"] += 1
+        d["points"] = True
+        if not p.kmds:
+            d["kmds"] = False
+    return {"pairs": [{"prop_x": x, "prop_y": y, "unit_x": ux, "unit_y": uy,
+                       "count": d["n"], "kmds": d["kmds"], "points": d["points"]}
+                      for (x, y, ux, uy), d in sorted(counts.items(), key=lambda kv: -kv[1]["n"])]}
+
+
+def _point_series(prop_x: str, prop_y: str):
+    """Measurement-temperature point values of prop_y, grouped per entity, as
+    marker-only series for the property-pair plot."""
+    if prop_x != "temperature":
+        return []
+    with Session(engine) as s:
+        rows = s.exec(select(PointValue).where(PointValue.prop == prop_y)).all()
+    by_entity: Dict[tuple, Dict[str, Any]] = {}
+    for p in rows:
+        if p.env_temperature is None:
+            continue
+        d = by_entity.setdefault((p.record_sid, p.entity), {
+            "sid": p.record_sid, "doi": p.doi, "sample": p.entity,
+            "composition": p.entity, "points": [], "type": "points", "unit_y": p.unit})
+        d["points"].append([p.env_temperature + 273.15, p.value])   # °C as recorded -> K
+    return list(by_entity.values())
 
 
 @app.get("/ui/graph")
-def ui_graph(prop_x: str, prop_y: str):
+def ui_graph(prop_x: str, prop_y: str, unit_x: Optional[str] = None,
+             unit_y: Optional[str] = None):
     with Session(engine) as s:
-        rows = s.exec(select(GraphCurve).where(
-            GraphCurve.prop_x == prop_x, GraphCurve.prop_y == prop_y)).all()
-    return {"prop_x": prop_x, "prop_y": prop_y, "count": len(rows),
-            "unit_x": rows[0].unit_x if rows else "", "unit_y": rows[0].unit_y if rows else "",
-            "curves": [{"sid": r.record_sid, "doi": r.doi, "sample": r.sample_name,
-                        "composition": r.composition, "points": json.loads(r.points_json)}
-                       for r in rows]}
+        q = select(GraphCurve).where(
+            GraphCurve.prop_x == prop_x, GraphCurve.prop_y == prop_y)
+        if unit_x is not None:
+            q = q.where(GraphCurve.unit_x == unit_x)
+        if unit_y is not None:
+            q = q.where(GraphCurve.unit_y == unit_y)
+        rows = s.exec(q).all()
+    curves = [{"sid": r.record_sid, "doi": r.doi, "sample": r.sample_name,
+               "composition": r.composition, "points": json.loads(r.points_json)}
+              for r in rows]
+    pts = _point_series(prop_x, prop_y)
+    if unit_y is not None:
+        pts = [p for p in pts if p.get("unit_y", "") == unit_y]
+    if unit_x is not None and unit_x != "K":
+        pts = []                       # env-temperature points are on a K axis
+    ux = rows[0].unit_x if rows else ("K" if pts else (unit_x or ""))
+    uy = rows[0].unit_y if rows else (pts[0].get("unit_y", "") if pts else (unit_y or ""))
+    return {"prop_x": prop_x, "prop_y": prop_y, "count": len(curves) + len(pts),
+            "unit_x": ux, "unit_y": uy, "curves": curves + pts}
+
+
+@app.get("/ui/record_points/{sid}")
+def ui_record_points(sid: int):
+    """A record's measured values grouped per property — feeds the per-paper
+    property charts on the record page."""
+    with Session(engine) as s:
+        rows = s.exec(select(PointValue).where(PointValue.record_sid == sid)).all()
+    groups: Dict[tuple, Dict[str, Any]] = {}
+    for p in rows:
+        g = groups.setdefault((p.prop, p.unit, p.source), {
+            "prop": p.prop, "unit": p.unit, "source": p.source,
+            "kmds": p.kmds, "category": p.category, "entries": []})
+        g["entries"].append({"entity": p.entity, "value": p.value,
+                             "env_temperature": p.env_temperature})
+    return {"sid": sid, "groups": sorted(groups.values(),
+                                         key=lambda g: (not g["kmds"], g["prop"]))}
+
+
+def _csv_response(rows: List[List[Any]], filename: str):
+    import csv
+    import io
+    from fastapi import Response
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow(["sid", "doi", "kind", "sample", "prop_x", "unit_x", "x",
+                "prop_y", "unit_y", "y"])
+    w.writerows(rows)
+    return Response(buf.getvalue(), media_type="text/csv",
+                    headers={"Content-Disposition": f'attachment; filename="{filename}"'})
+
+
+def _curve_csv_rows(rows) -> List[List[Any]]:
+    out = []
+    for r in rows:
+        for p in json.loads(r.points_json):
+            out.append([r.record_sid, r.doi, "curve", r.sample_name,
+                        r.prop_x, r.unit_x, p[0], r.prop_y, r.unit_y, p[1]])
+    return out
+
+
+def _point_csv_rows(pvs) -> List[List[Any]]:
+    return [[p.record_sid, p.doi, f"point:{p.source}", p.entity,
+             "temperature" if p.env_temperature is not None else "",
+             "°C" if p.env_temperature is not None else "",
+             p.env_temperature if p.env_temperature is not None else "",
+             p.prop, p.unit, p.value] for p in pvs]
+
+
+@app.get("/ui/export.csv")
+def ui_export_csv():
+    """The whole dataset in long form — every digitized curve point and every
+    measured value (the Starrydata-style bulk download)."""
+    with Session(engine) as s:
+        curves = s.exec(select(GraphCurve)).all()
+        pvs = s.exec(select(PointValue)).all()
+    return _csv_response(_curve_csv_rows(curves) + _point_csv_rows(pvs),
+                         "starrydata3_dataset.csv")
+
+
+@app.get("/ui/export.json")
+def ui_export_json():
+    """Every stored KMDS record, verbatim — the full-fidelity local backup.
+    Re-uploading each record recreates the database (curves and measured
+    values are re-indexed on ingest)."""
+    from fastapi import Response
+    with Session(engine) as s:
+        recs = s.exec(select(Record)).all()
+    dump = {"service": "starrydata3", "exported_at": _now(), "count": len(recs),
+            "records": [{"sid": r.sid, "doi": r.doi, "title": r.title,
+                         "n_violations": r.n_violations, "updated_at": r.updated_at,
+                         "record": json.loads(r.record_json or "{}")} for r in recs]}
+    return Response(json.dumps(dump, ensure_ascii=False, indent=1),
+                    media_type="application/json",
+                    headers={"Content-Disposition":
+                             'attachment; filename="starrydata3_records.json"'})
+
+
+@app.get("/ui/graph.csv")
+def ui_graph_csv(prop_x: str, prop_y: str, unit_x: Optional[str] = None,
+                 unit_y: Optional[str] = None):
+    """The currently-plotted property pair as CSV."""
+    with Session(engine) as s:
+        q = select(GraphCurve).where(
+            GraphCurve.prop_x == prop_x, GraphCurve.prop_y == prop_y)
+        if unit_x is not None:
+            q = q.where(GraphCurve.unit_x == unit_x)
+        if unit_y is not None:
+            q = q.where(GraphCurve.unit_y == unit_y)
+        curves = s.exec(q).all()
+        pvs = (s.exec(select(PointValue).where(PointValue.prop == prop_y)).all()
+               if prop_x == "temperature" and unit_x in (None, "K") else [])
+    pvs = [p for p in pvs if p.env_temperature is not None
+           and (unit_y is None or p.unit == unit_y)]
+    name = f"{prop_x}_vs_{prop_y}".replace(" ", "_").replace("/", "-")
+    return _csv_response(_curve_csv_rows(curves) + _point_csv_rows(pvs), f"{name}.csv")
 
 
 # ---------------------------------------------------------------------------

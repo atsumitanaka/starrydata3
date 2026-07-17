@@ -78,6 +78,17 @@ def cmd_seedprops(args):
     from starrydata3.units import _clean
     path = args.schema or SCHEMA_PATH
     vocab = property_vocab_from_kmds(path)
+    # local vocabulary extensions (terms official KMDS lacks, e.g. battery
+    # properties) — honestly labeled via their "(extension)" category.
+    ext_path = os.path.join(os.path.dirname(path), "kmds_vocab_extensions.json")
+    n_ext = 0
+    if os.path.exists(ext_path):
+        with open(ext_path, encoding="utf-8") as f:
+            for e in json.load(f).get("extensions") or []:
+                if e.get("name"):
+                    vocab.append((e["name"], e.get("category") or "(extension)",
+                                  e.get("unit") or ""))
+                    n_ext += 1
     init_db()
     added = 0
     with Session(engine) as s:
@@ -90,8 +101,9 @@ def cmd_seedprops(args):
             s.add(Property(name=name, category=cat, default_unit=cu))
             added += 1
         s.commit()
-    print(f"✓ seeded {added} properties (from {os.path.basename(path)}); "
-          f"{len(vocab)} in KMDS vocabulary")
+    print(f"✓ seeded {added} properties (from {os.path.basename(path)}"
+          f"{f' + {n_ext} extensions' if n_ext else ''}); "
+          f"{len(vocab)} in vocabulary")
 
 
 def cmd_createkey(args):
