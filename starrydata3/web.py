@@ -83,7 +83,6 @@ def layout(title, active, body, extra_js=""):
         f'<a href="{href}" class="{"on" if active==key else ""}">{label}</a>'
         for key, href, label in [("home", "/", "Database"),
                                   ("explore", "/explore", "Explore"),
-                                  ("digitize", "/digitize", "Digitize PDF"),
                                   ("upload", "/upload", "Upload"),
                                   ("api", "/docs", "API")])
     return HTMLResponse(f"""<!doctype html><html lang="en"><head><meta charset="utf-8">
@@ -309,189 +308,6 @@ def upload_page():
     return layout("Upload", "upload", body, UPLOAD_JS)
 
 
-DIGITIZE_JS = """
-const f=document.getElementById('pdf'), keyIn=document.getElementById('key');
-const out=document.getElementById('out'), go=document.getElementById('go');
-const COL=__PALETTE__;
-let RID=null, FIGS=[];
-function esc(s){return (s+'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]))}
-function splitNU(name){ // "Temperature (K)" -> {name:"Temperature", unit:"K"}
-  const m=(name||'').match(/^(.*?)\\s*\\(([^()]+)\\)\\s*$/);
-  return m?{name:m[1].trim(),unit:m[2].trim()}:{name:(name||'').trim(),unit:''};
-}
-go.addEventListener('click', async ()=>{
-  const key=keyIn.value.trim();
-  if(!f.files[0]){alert('Choose a PDF');return;}
-  if(!key){alert('Enter your API key');return;}
-  const review=document.getElementById('review').checked;
-  go.disabled=true; out.innerHTML='Uploading PDF…';
-  const fd=new FormData(); fd.append('file', f.files[0]);
-  const url=review?'/api/v1/review/start':'/api/v1/process_pdf';
-  let r;
-  try{ r=await fetch(url,{method:'POST',headers:{'X-API-Key':key},body:fd}); }
-  catch(e){ out.innerHTML='<span style=color:#c0392b>network error</span>'; go.disabled=false; return; }
-  const d=await r.json();
-  if(!r.ok){ out.innerHTML='<span style=color:#c0392b>HTTP '+r.status+': '+esc(JSON.stringify(d.detail||d))+'</span>'; go.disabled=false; return; }
-  const job=d.job_id;
-  out.innerHTML='Digitizing… <span class=muted id=stg></span>';
-  const poll=setInterval(async ()=>{
-    const jr=await fetch('/api/v1/jobs/'+job,{headers:{'X-API-Key':key}});
-    const j=await jr.json();
-    document.getElementById('stg') && (document.getElementById('stg').textContent=j.stage||'');
-    if(j.status==='done'){ clearInterval(poll); go.disabled=false;
-      if(review){ out.textContent=''; openReview(j.review_id); }
-      else{ const res=j.result||{};
-        out.innerHTML='<div style=color:#27ae60>✓ Digitized → <a href="/view/'+j.sid+'">SID-'+j.sid+'</a> — '+
-          (res.curves_indexed||0)+' curves, '+(res.kmds_curves||0)+' KMDS-conformant.</div>'; } }
-    else if(j.status==='error'){ clearInterval(poll); go.disabled=false;
-      out.innerHTML='<span style=color:#c0392b>Failed: '+esc(j.error||'')+'</span>'; }
-  }, 1500);
-});
-
-async function openReview(rid){
-  RID=rid;
-  const d=await (await fetch('/api/v1/review/'+rid)).json();
-  FIGS=d.figures;
-  document.getElementById('rdoi').value=d.doi||'';
-  document.getElementById('board').style.display='block';
-  document.getElementById('figs').innerHTML=FIGS.map((fg,i)=>{
-    const xu=splitNU(fg.x_name), yu=splitNU(fg.y_name);
-    const fmtR=v=>{const a=Math.abs(v);return (a&&(a<0.01||a>=1e4))?v.toExponential(1):(+v.toPrecision(3))};
-    const ser=fg.series.map((s,j)=>`
-      <div style="display:flex;gap:8px;align-items:center;margin:4px 0">
-        <i style="width:14px;height:14px;border-radius:3px;background:${COL[j%COL.length]};flex:none"></i>
-        <input class="search" style="padding:5px 9px;font-size:13px" id="lab_${i}_${j}" value="${esc(s.label)}">
-        <span class="muted small" style="white-space:nowrap" title="digitized data range — if this doesn't match the axis ticks, re-read the axes">${s.n_points} pts · x ${fmtR(s.range.x_min)}–${fmtR(s.range.x_max)} · y ${fmtR(s.range.y_min)}–${fmtR(s.range.y_max)}</span>
-        <label class="ck"><input type="checkbox" id="sinc_${i}_${j}" checked>keep</label>
-      </div>`).join('');
-    const controls = fg.calibrated ? `
-      <div style="display:grid;grid-template-columns:1fr 90px;gap:8px;margin-bottom:6px">
-        <input class="search" style="padding:5px 9px;font-size:13px" id="xn_${i}" value="${esc(xu.name)}" placeholder="x property">
-        <input class="search" style="padding:5px 9px;font-size:13px" id="xu_${i}" value="${esc(xu.unit)}" placeholder="unit">
-        <input class="search" style="padding:5px 9px;font-size:13px" id="yn_${i}" value="${esc(yu.name)}" placeholder="y property">
-        <input class="search" style="padding:5px 9px;font-size:13px" id="yu_${i}" value="${esc(yu.unit)}" placeholder="unit">
-      </div>
-      <div class="muted small" style="margin-bottom:4px">${fg.x_log?'log x · ':''}${fg.y_log?'log y · ':''}${fg.series.length} curve(s)${fg.calibration==='claude'?' · <span style="color:#8e44ad">✦ axes read by Claude — double-check ranges</span>':''}</div>
-      ${ser}
-      <div style="margin-top:8px"><button class="pairbtn" style="cursor:pointer" onclick="recal(${i})">✦ Re-read axes with Claude</button>
-      <span class="muted small" id="rc_${i}"></span></div>` : `<div class="warn">✗ ${esc(fg.error||'not digitizable')} — excluded</div>`;
-    return `<div class="card" id="fig_${i}">
-      <div style="display:flex;justify-content:space-between;gap:10px;align-items:baseline">
-        <h2 style="margin:0">${esc(fg.caption)} ${fg.detector?`<span class="muted small" style="font-weight:400">· located by ${fg.detector==='mineru'?'MinerU PP-DocLayoutV2':esc(fg.detector)}</span>`:''}</h2>
-        <label class="ck" style="flex:none"><input type="checkbox" id="finc_${i}" ${fg.calibrated?'checked':''} ${fg.calibrated?'':'disabled'}>include</label>
-      </div>
-      <div style="display:grid;grid-template-columns:minmax(280px,1.2fr) 1fr;gap:16px;margin-top:10px">
-        <div class="figwrap" style="position:relative">
-          <img src="${fg.image_url}" style="width:100%;display:block;border:1px solid var(--line);border-radius:6px" id="img_${i}">
-          <canvas id="ov_${i}" width="${fg.width}" height="${fg.height}"
-            style="position:absolute;inset:0;width:100%;height:100%;pointer-events:none"></canvas>
-        </div>
-        <div>${controls}</div>
-      </div></div>`;
-  }).join('');
-  FIGS.forEach((fg,i)=>{
-    const cv=document.getElementById('ov_'+i); if(!cv) return;
-    const g=cv.getContext('2d');
-    fg.series.forEach((s,j)=>{
-      g.strokeStyle=COL[j%COL.length]; g.lineWidth=Math.max(2,fg.width/400); g.beginPath();
-      (s.points_px||[]).forEach((p,k)=>k?g.lineTo(p[0],p[1]):g.moveTo(p[0],p[1]));
-      g.stroke();
-    });
-  });
-  window.scrollTo({top:document.getElementById('board').offsetTop-70,behavior:'smooth'});
-}
-
-async function recal(i){
-  const key=keyIn.value.trim();
-  if(!key){alert('Enter your API key');return;}
-  const el=document.getElementById('rc_'+i); el.textContent='Asking Claude to read the axes…';
-  const r=await fetch('/api/v1/review/'+RID+'/recalibrate/'+FIGS[i].index,
-    {method:'POST',headers:{'X-API-Key':key}});
-  const d=await r.json();
-  if(!r.ok){el.textContent='failed: '+JSON.stringify(d.detail||d);return;}
-  const edits={};   // keep the reviewer's typed labels/axis names across the refresh
-  FIGS.forEach((fg,k)=>{edits[k]={xn:document.getElementById('xn_'+k)?.value,xu:document.getElementById('xu_'+k)?.value,
-    yn:document.getElementById('yn_'+k)?.value,yu:document.getElementById('yu_'+k)?.value,
-    labs:fg.series.map((s,j)=>document.getElementById('lab_'+k+'_'+j)?.value)}});
-  await openReview(RID);
-  FIGS.forEach((fg,k)=>{const e=edits[k]; if(!e) return;
-    if(e.xn!=null&&document.getElementById('xn_'+k)) document.getElementById('xn_'+k).value=e.xn;
-    if(e.xu!=null&&document.getElementById('xu_'+k)) document.getElementById('xu_'+k).value=e.xu;
-    if(e.yn!=null&&document.getElementById('yn_'+k)) document.getElementById('yn_'+k).value=e.yn;
-    if(e.yu!=null&&document.getElementById('yu_'+k)) document.getElementById('yu_'+k).value=e.yu;
-    (e.labs||[]).forEach((v,j)=>{if(v!=null&&document.getElementById('lab_'+k+'_'+j)) document.getElementById('lab_'+k+'_'+j).value=v;});});
-}
-
-document.getElementById('commit').addEventListener('click', async ()=>{
-  const key=keyIn.value.trim();
-  if(!key){alert('Enter your API key');return;}
-  const body={doi:document.getElementById('rdoi').value.trim(),
-              title:document.getElementById('rtitle').value.trim(),
-              figures:FIGS.map((fg,i)=>({index:fg.index,
-                include:!!document.getElementById('finc_'+i)?.checked,
-                x_name:document.getElementById('xn_'+i)?.value||'',
-                x_unit:document.getElementById('xu_'+i)?.value||'',
-                y_name:document.getElementById('yn_'+i)?.value||'',
-                y_unit:document.getElementById('yu_'+i)?.value||'',
-                x_log:fg.x_log, y_log:fg.y_log,
-                series:fg.series.map((s,j)=>({label:document.getElementById('lab_'+i+'_'+j)?.value||s.label,
-                  include:!!document.getElementById('sinc_'+i+'_'+j)?.checked}))}))};
-  const co=document.getElementById('cout'); co.textContent='Storing…';
-  const r=await fetch('/api/v1/review/'+RID+'/commit',{method:'POST',
-    headers:{'Content-Type':'application/json','X-API-Key':key},body:JSON.stringify(body)});
-  const d=await r.json();
-  if(r.ok){ co.innerHTML='<div style=color:#27ae60>✓ Stored as <a href="/view/'+d.sid+'">SID-'+d.sid+'</a> — '+
-    (d.curves_indexed||0)+' curves indexed ('+(d.kmds_curves||0)+' KMDS-conformant).</div>';
-    document.getElementById('figs').style.opacity=.5; }
-  else co.innerHTML='<span style=color:#c0392b>HTTP '+r.status+': '+esc(JSON.stringify(d.detail||d))+'</span>';
-});
-document.getElementById('discard').addEventListener('click', async ()=>{
-  const key=keyIn.value.trim();
-  if(RID) await fetch('/api/v1/review/'+RID,{method:'DELETE',headers:{'X-API-Key':key}});
-  document.getElementById('board').style.display='none';
-  document.getElementById('figs').innerHTML=''; RID=null;
-});
-""".replace("__PALETTE__", json.dumps(PALETTE))
-
-
-def digitize_page():
-    body = """
-<div class="card">
-  <h1>Digitize a paper</h1>
-  <p class="muted" style="margin-top:0">Upload a PDF — every figure is extracted,
-  axis-calibrated, and its curves digitized and named from the legend, then
-  <b>you verify each figure</b> before anything is stored. The whole pipeline runs
-  locally: the ML weights (LineFormer + ChartDete) live in your AutoLineDigitizer
-  install — nothing leaves this machine. First PDF loads the models, so allow a minute.</p>
-  <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:12px 0">
-    <input type="file" id="pdf" accept="application/pdf">
-    <input class="search" id="key" placeholder="API key (sd3_…)" style="max-width:360px" type="password">
-    <label class="ck"><input type="checkbox" id="review" checked>verify each figure first</label>
-    <button id="go" class="pairbtn on" style="cursor:pointer">Digitize</button>
-  </div>
-  <div id="out"></div>
-</div>
-<div id="board" style="display:none">
-  <div class="card">
-    <h2>Verify the digitization</h2>
-    <p class="muted small" style="margin-top:0">Check every figure: fix axis property
-    names/units, rename or drop curves, exclude bad figures. Only what you approve is stored.</p>
-    <div style="display:flex;gap:10px;flex-wrap:wrap">
-      <input class="search" id="rdoi" placeholder="DOI (10.xxxx/…)" style="max-width:320px">
-      <input class="search" id="rtitle" placeholder="Paper title (optional)" style="flex:1;min-width:260px">
-    </div>
-  </div>
-  <div id="figs"></div>
-  <div class="card">
-    <button id="commit" class="pairbtn on" style="cursor:pointer;font-size:14px">✓ Store approved figures</button>
-    <button id="discard" class="pairbtn" style="cursor:pointer">Discard session</button>
-    <div id="cout" style="margin-top:12px"></div>
-  </div>
-</div>
-<div class="card muted small">Every stored curve is validated against the KMDS
-vocabulary and unit-normalized on ingest, same as a direct upload.</div>"""
-    return layout("Digitize", "digitize", body, DIGITIZE_JS)
-
 
 def _svg_plot(curves):
     pts = [p for c in curves for p in c["points"]]
@@ -635,7 +451,9 @@ def record_page(rec, curves, points, record_json):
                   f'<div class="muted small">{len(cs)} curve(s), {sum(len(c["points"]) for c in cs)} points</div>'
                   f'{_svg_plot(cs)}</div>')
     if not plots:
-        plots = '<div class="card muted small">no digitized curves — digitize the paper\'s PDF on the <a href="/digitize">Digitize</a> tab to add some</div>'
+        plots = ('<div class="card muted small">no digitized curves — digitize the '
+                 'paper\'s PDF in AutoLineDigitizer and use its '
+                 '<i>Upload approved &rarr; Starrydata3</i> button</div>')
     # abstract + keywords
     abstract = ""
     if pub.get("abstract"):
@@ -684,10 +502,6 @@ def register_ui(app, engine, Record, GraphCurve, select, Session):
     @app.get("/upload", response_class=HTMLResponse)
     def _upload():
         return upload_page()
-
-    @app.get("/digitize", response_class=HTMLResponse)
-    def _digitize():
-        return digitize_page()
 
     @app.get("/ui/record/{sid}")
     def _raw(sid: int):

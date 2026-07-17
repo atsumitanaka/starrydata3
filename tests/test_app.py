@@ -226,55 +226,6 @@ def test_json_full_export(client, wkey):
     assert rec["record"]["metadata"]["publication"]["DOI"] == "10.1234/test.001"
 
 
-def test_assemble_record_and_review_commit(client, wkey):
-    """The digitization review flow: a session's approved figures become a
-    stored KMDS record with legend labels as samples."""
-    from starrydata3.app import _REVIEWS
-    import tempfile
-    _REVIEWS["testrid"] = {
-        "doi": "10.9/review.1", "created": "now", "dir": tempfile.mkdtemp(),
-        "figures": [
-            {"index": 0, "caption": "Fig 1", "calibrated": True, "error": "",
-             "x_name": "Temperature (K)", "y_name": "ZT",
-             "x_log": False, "y_log": False, "width": 100, "height": 80,
-             "image_path": "/nonexistent.png",
-             "series": [
-                 {"label": "Line 1", "points_px": [[1, 2]],
-                  "points_data": [[300, 0.1], [400, 0.4], [500, 0.9]]},
-                 {"label": "junk", "points_px": [[3, 4]],
-                  "points_data": [[1, 1], [2, 2], [3, 3]]}]},
-            {"index": 1, "caption": "Fig 2 (bad)", "calibrated": False,
-             "error": "no calibratable axes detected", "x_name": "", "y_name": "",
-             "x_log": False, "y_log": False, "width": 10, "height": 10,
-             "image_path": "/nonexistent.png", "series": []},
-        ]}
-    # the session is readable by the verification UI
-    d = client.get("/api/v1/review/testrid").json()
-    assert len(d["figures"]) == 2 and d["figures"][1]["calibrated"] is False
-    # commit: keep figure 0, rename its first series, drop the junk one
-    r = client.post("/api/v1/review/testrid/commit", headers={"X-API-Key": wkey},
-                    json={"doi": "10.9/review.1", "title": "Reviewed paper",
-                          "figures": [
-                              {"index": 0, "include": True,
-                               "x_name": "Temperature", "x_unit": "K",
-                               "y_name": "ZT", "y_unit": "-",
-                               "series": [{"label": "SnSe poly", "include": True},
-                                          {"label": "junk", "include": False}]},
-                              {"index": 1, "include": False}]})
-    assert r.status_code == 200, r.text
-    body = r.json()
-    assert body["curves_indexed"] == 1 and body["kmds_curves"] == 1
-    assert "testrid" not in _REVIEWS                 # session consumed
-    g = client.get("/ui/graph", params={"prop_x": "temperature", "prop_y": "ZT"}).json()
-    assert any(c["sample"] == "SnSe poly" for c in g["curves"])
-    # the stored record carries the reviewed sample + real axis units
-    rec = client.get(f"/api/v1/records/{body['sid']}", headers={"X-API-Key": wkey}).json()
-    pub = rec["metadata"]["publication"]
-    assert pub["title"] == "Reviewed paper"
-    assert [s["name"] for s in pub["samples"]] == ["SnSe poly"]
-    assert pub["figures"][0]["graphs"][0]["axes"][0]["unit"] == "K"
-
-
 def test_caption_symbol_mapping(client, wkey):
     """Header symbols are resolved through the table's own caption definitions:
     'Young's modulus (E) and Poisson's ratio (γ)' makes columns E/γ KMDS."""
@@ -297,42 +248,6 @@ def test_caption_symbol_mapping(client, wkey):
     by_prop = {g["prop"]: g for g in d["groups"]}
     assert by_prop["Young's modulus"]["kmds"] and by_prop["Young's modulus"]["unit"] == "GPa"
     assert by_prop["Poisson's ratio"]["kmds"]
-
-
-def test_digitized_curves_merge_into_existing_record(client, wkey):
-    """Digitizing a PDF whose DOI is already stored must enrich the record
-    (append figures/samples), never clobber its metadata."""
-    from starrydata3.app import _REVIEWS
-    import tempfile
-    _REVIEWS["mergerid"] = {
-        "doi": "10.9/pts.1", "created": "now", "dir": tempfile.mkdtemp(),
-        "figures": [
-            {"index": 0, "caption": "Fig 9", "calibrated": True, "error": "",
-             "x_name": "Temperature (K)", "y_name": "thermal conductivity",
-             "x_log": False, "y_log": False, "width": 100, "height": 80,
-             "image_path": "/nonexistent.png",
-             "series": [{"label": "A + B", "points_px": [[1, 2]],
-                         "points_data": [[300, 0.3], [350, 0.5], [400, 0.8]]}]}]}
-    r = client.post("/api/v1/review/mergerid/commit", headers={"X-API-Key": wkey},
-                    json={"doi": "10.9/pts.1",
-                          "figures": [{"index": 0, "include": True,
-                                       "x_name": "Temperature", "x_unit": "K",
-                                       "y_name": "thermal conductivity",
-                                       "y_unit": "W m^-1 K^-1",
-                                       "series": [{"label": "A + B", "include": True}]}]})
-    assert r.status_code == 200, r.text
-    body = r.json()
-    assert body["curves_indexed"] == 1
-    rec = client.get(f"/api/v1/records/{body['sid']}", headers={"X-API-Key": wkey}).json()
-    pub = rec["metadata"]["publication"]
-    assert pub["title"] == "Point values"                 # metadata survived
-    assert pub["tables"] and len(pub["samples"]) == 2     # original + digitized sample
-    ids = [s["sample local id"] for s in pub["samples"]]
-    assert len(set(ids)) == 2                             # collision remapped
-    assert pub["figures"][-1]["graphs"][0]["samples"] == [ids[-1]]
-    # and the point values survived re-indexing of the merged record
-    d = client.get(f"/ui/record_points/{body['sid']}").json()
-    assert any(g["prop"] == "glass transition temperature" for g in d["groups"])
 
 
 def test_stub_upload_merges_instead_of_clobbering(client, wkey):

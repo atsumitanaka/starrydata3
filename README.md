@@ -1,9 +1,11 @@
 # Starrydata3
 
 A private, **KMDS-based** materials-data service — a self-hosted, always-local
-successor to the Starrydata web app, with a proper **write API**, a full web UI,
-and (optionally) the complete **AutoLineDigitizer** PDF-digitization pipeline
-built in, so nothing ever has to leave your machine.
+successor to the Starrydata web app, with a proper **write API** and a full web
+UI. Digitization happens in
+[AutoLineDigitizer](https://github.com/adityaaa-IIT-BHU/AutoLineDigitizer)
+(the desktop app), which pushes verified figures here with one button — nothing
+ever has to leave your machine.
 
 The canonical stored object is a full **KMDS record** (the relational schema:
 `publication → samples / figures → graphs / materials`). Records are validated
@@ -17,7 +19,6 @@ the classic property-pair query (*Temperature vs ZT*) works across papers.
 - **Record view** — abstract + keywords, per-property bar charts of measured values, digitized-curve plots, KMDS tables, samples, materials, figures & graphs.
 - **Full KMDS viewer** (`/kmds/{sid}`) — the complete editorial record viewer (overview, materials property trees, conclusions, passages, references…), auto-loaded per record.
 - **Explorer** — every curve of a property pair across all papers, plus measured values as point markers; log axes; CSV download of any plot.
-- **Digitize studio** (`/digitize`) — upload a PDF, every figure is extracted, axis-calibrated, and digitized locally, then **you verify each figure** (axis names/units, rename/drop curves, exclude figures) before anything is stored. Quick no-review mode included.
 - **Exports** — one-click full-database download as KMDS JSON (complete backup; re-upload to restore) or long-form CSV of every curve point and measured value.
 - **Vocabulary honesty** — axis/table properties are matched to the official KMDS vocabulary (248 terms) plus clearly-labeled local extensions (`kmds_vocab_extensions.json`, e.g. electrochemical terms official KMDS lacks). Unmatched terms are stored verbatim and flagged — never silently renamed.
 - **Safe upserts** — records upsert by DOI; a digitization-only upload (curves, no metadata) is **merged into** an existing record, never allowed to clobber it.
@@ -36,20 +37,14 @@ python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 
 Open http://localhost:8300 — interactive API docs at `/docs`.
 
-### With local PDF digitization (the full studio)
+### Digitizing papers
 
-The digitize studio reuses the [AutoLineDigitizer](https://github.com/adityaaa-IIT-BHU/AutoLineDigitizer)
-engine — install it next to this repo (see its README for the ML environment +
-model weights; everything is downloaded once and runs on your laptop), then run
-Starrydata3 **from that environment** so torch/mmdet/easyocr are available:
-
-```bash
-ALD_SRC=/path/to/AutoLineDigitizer/src \
-  /path/to/alddev-env/bin/uvicorn starrydata3.app:app --host 127.0.0.1 --port 8300
-```
-
-Without `ALD_SRC` the rest of Starrydata3 works normally; only `/digitize`
-reports the pipeline as unavailable.
+Install [AutoLineDigitizer](https://github.com/adityaaa-IIT-BHU/AutoLineDigitizer)
+(see its README — the ML models run fully on your laptop). Open a paper PDF
+there, verify each figure (axes, curve labels, KMDS terms), then press
+**Upload approved → Starrydata3** with this server's URL + your API key.
+Digitization-only uploads merge into existing records; they never overwrite
+stored metadata.
 
 ## API
 
@@ -62,9 +57,6 @@ All write endpoints require `X-API-Key: <key>`.
 | POST | `/api/v1/validate` | validate without storing |
 | GET | `/api/v1/records` / `/{sid}` | list / fetch full KMDS record |
 | GET | `/api/v1/graphs?prop_x=&prop_y=` | property-pair query across papers |
-| POST | `/api/v1/process_pdf` | digitize a PDF end-to-end (quick mode) |
-| POST | `/api/v1/review/start` | digitize into a review session |
-| GET/POST | `/api/v1/review/{rid}` / `…/commit` | inspect / commit verified figures |
 | GET | `/ui/export.json` · `/ui/export.csv` | full backup / long-form dataset |
 
 ## Uploading
