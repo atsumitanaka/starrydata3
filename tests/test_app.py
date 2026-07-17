@@ -6,9 +6,10 @@ import tempfile
 
 import pytest
 
-# isolate a temp DB before importing the app
+# isolate a temp DB (and vocabulary-extensions file) before importing the app
 _TMP = tempfile.mkdtemp(prefix="sd3_test_")
 os.environ["SD3_DB"] = os.path.join(_TMP, "test.db")
+os.environ["SD3_VOCAB_EXT"] = os.path.join(_TMP, "ext.json")
 
 import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -214,6 +215,40 @@ def test_csv_exports(client, wkey):
     assert "thermal conductivity" in full.text and "curve" in full.text
     one = client.get("/ui/graph.csv", params={"prop_x": "temperature", "prop_y": "ZT"})
     assert one.status_code == 200 and "ZT" in one.text
+
+
+def test_vocabulary_grows_via_api(client, wkey, rkey):
+    """New properties turn up over time — POST /api/v1/properties adds an
+    extension term to the DB AND the extensions file; ingest then matches it."""
+    r = client.post("/api/v1/properties", headers={"X-API-Key": wkey},
+                    json={"name": "zeta potential",
+                          "category": "electrochemical property",
+                          "unit": "mV", "added_by": "claude"})
+    assert r.status_code == 200 and r.json()["added"] is True
+    assert "(extension)" in r.json()["category"]
+    # duplicate (case/spacing-insensitive) is a no-op
+    r = client.post("/api/v1/properties", headers={"X-API-Key": wkey},
+                    json={"name": "Zeta Potential"})
+    assert r.json()["added"] is False
+    # persisted to the extensions file for reseeds
+    ext = json.load(open(os.environ["SD3_VOCAB_EXT"])).get("extensions")
+    assert any(e["name"] == "zeta potential" for e in ext)
+    # and ingest now matches it
+    rec = {"metadata": {"publication": {
+        "DOI": "10.9/ion.1", "title": "Zeta",
+        "samples": [{"sample local id": "s-001", "name": "LLZO",
+                     "components": [{"name": "LLZO"}]}],
+        "figures": [{"figure local id": "f-001", "graphs": [{
+            "graph local id": "g-001",
+            "axes": [{"axis": "x", "quantity": {"term": "temperature"}, "unit": "K"},
+                     {"axis": "y", "quantity": {"term": "Ionic conductivity"},
+                      "unit": "S cm^-1"}],
+            "samples": ["s-001"],
+            "digitization_data": {"series": [
+                {"label": "LLZO", "points_data": [[300, 1e-4], [400, 1e-3], [500, 5e-3]]}]}}]}],
+    }}, "materials": [{"id": "material_01", "name": "LLZO"}]}
+    r = client.post("/api/v1/records", json=rec, headers={"X-API-Key": wkey})
+    assert r.status_code == 200 and r.json()["kmds_curves"] == 1
 
 
 def test_json_full_export(client, wkey):

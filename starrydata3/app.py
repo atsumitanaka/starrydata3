@@ -754,6 +754,52 @@ def list_properties(key: APIKey = Depends(require_scope("read"))):
                             "default_unit": p.default_unit} for p in props]}
 
 
+@app.post("/api/v1/properties")
+def add_property(body: Dict[str, Any] = Body(...),
+                 key: APIKey = Depends(require_scope("write"))):
+    """Grow the vocabulary with an EXTENSION term (new properties inevitably
+    turn up — AutoLineDigitizer posts Claude-proposed terms here so app and
+    server stay in sync). The term is added to the Property table AND appended
+    to kmds_vocab_extensions.json, so a reseed/fresh install keeps it. Official
+    KMDS terms are never modified; duplicates are no-ops."""
+    name = (body.get("name") or "").strip()
+    if not name:
+        raise HTTPException(400, "property needs a name")
+    category = (body.get("category") or "property").strip()
+    if "(extension)" not in category:
+        category += " (extension)"
+    unit = (body.get("default_unit") or body.get("unit") or "").strip()
+
+    with Session(engine) as s:
+        props = s.exec(select(Property)).all()
+        vocab_norm = {_norm_prop(p.name): p.name for p in props}
+        existing = vocab_norm.get(_norm_prop(name))
+        if existing:
+            return {"ok": True, "added": False, "name": existing,
+                    "detail": "already in the vocabulary"}
+        s.add(Property(name=name, category=category, default_unit=unit))
+        s.commit()
+
+    ext_path = os.environ.get("SD3_VOCAB_EXT",
+                              os.path.join(ROOT, "kmds_vocab_extensions.json"))
+    try:
+        with open(ext_path, encoding="utf-8") as f:
+            doc = json.load(f)
+    except Exception:  # noqa: BLE001
+        doc = {"extensions": []}
+    if not any(_norm_prop(e.get("name", "")) == _norm_prop(name)
+               for e in doc.get("extensions") or []):
+        entry = {"name": name, "category": category, "unit": unit}
+        if body.get("added_by"):
+            entry["added_by"] = str(body["added_by"])
+        doc.setdefault("extensions", []).append(entry)
+        with open(ext_path, "w", encoding="utf-8") as f:
+            json.dump(doc, f, ensure_ascii=False, indent=2)
+
+    return {"ok": True, "added": True, "name": name,
+            "category": category, "default_unit": unit}
+
+
 # ---------------------------------------------------------------------------
 # UI data endpoints (public, read-only JSON for the web frontend).
 # ---------------------------------------------------------------------------
