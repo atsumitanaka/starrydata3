@@ -505,7 +505,7 @@ def _normalize_point(value: float, raw_unit: str, canon: str):
 # App
 # ---------------------------------------------------------------------------
 
-app = FastAPI(title="Starrydata3", version="1.0.0",
+app = FastAPI(title="Starrydata3", version="0.0.1",
               description="Private, KMDS-based materials-data service with API-key writes.")
 
 
