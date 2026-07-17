@@ -39,12 +39,15 @@ Open http://localhost:8300 — interactive API docs at `/docs`.
 
 ### Digitizing papers
 
-Install [AutoLineDigitizer](https://github.com/adityaaa-IIT-BHU/AutoLineDigitizer)
-(see its README — the ML models run fully on your laptop). Open a paper PDF
-there, verify each figure (axes, curve labels, KMDS terms), then press
-**Upload approved → Starrydata3** with this server's URL + your API key.
-Digitization-only uploads merge into existing records; they never overwrite
-stored metadata.
+Grab **AutoLineDigitizer** from its release page —
+**https://github.com/adityaaa-IIT-BHU/AutoLineDigitizer/releases/latest** —
+everything you need (the app + the ML model weights) is on that one page, with
+step-by-step install instructions; after downloading, no internet is required.
+
+Open a paper PDF there, verify each figure (axes, curve labels, KMDS terms),
+then press **Upload approved → Starrydata3** with this server's URL + your API
+key. Digitization-only uploads merge into existing records; they never
+overwrite stored metadata.
 
 ## API
 
