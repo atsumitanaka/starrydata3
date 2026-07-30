@@ -6,6 +6,7 @@ manage.py — Starrydata3 admin CLI.
     python -m starrydata3.manage seedprops [path/to/kmds_schema.json]
     python -m starrydata3.manage createkey <name> [--scope read|write|admin]
     python -m starrydata3.manage listkeys
+    python -m starrydata3.manage recheck
 """
 import argparse
 import json
@@ -126,6 +127,24 @@ def cmd_listkeys(_):
         print("  (no keys yet — createkey <name>)")
 
 
+def cmd_recheck(_):
+    """Recompute cross-property consistency flags for every stored record."""
+    from starrydata3.app import Record, run_checks
+    init_db()
+    with Session(engine) as s:
+        recs = s.exec(select(Record)).all()
+        total = 0
+        for rec in recs:
+            flags = run_checks(rec.sid, s)
+            total += len(flags)
+            for f in flags:
+                mark = {"ok": "✓", "warn": "⚠", "fail": "✗"}.get(f["status"], "?")
+                print(f"  {mark} SID-{rec.sid} [{f['sample']}] {f['check']}: "
+                      f"{f['status']} (median dev {f['median_dev']:.1%}, "
+                      f"{f['n_points']} pts) — {f['detail']}")
+    print(f"✓ {len(recs)} records rechecked, {total} checks ran")
+
+
 def main():
     p = argparse.ArgumentParser(prog="starrydata3.manage")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -135,6 +154,7 @@ def main():
     ck.add_argument("--scope", default="write", choices=["read", "write", "admin"])
     ck.set_defaults(func=cmd_createkey)
     sub.add_parser("listkeys").set_defaults(func=cmd_listkeys)
+    sub.add_parser("recheck").set_defaults(func=cmd_recheck)
     args = p.parse_args()
     args.func(args)
 

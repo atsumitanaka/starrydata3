@@ -164,6 +164,8 @@ async function pick(i){
   const qs='prop_x='+encodeURIComponent(p.prop_x)+'&prop_y='+encodeURIComponent(p.prop_y)
     +'&unit_x='+encodeURIComponent(p.unit_x||'')+'&unit_y='+encodeURIComponent(p.unit_y||'');
   const d=await (await fetch('/ui/graph?'+qs)).json();
+  try{const b=await (await fetch('/ui/band?'+qs)).json();
+      d.band=(b.x&&b.x.length>=2)?b:null;}catch(e){d.band=null;}
   CUR=d; draw();
   document.getElementById('ptitle').textContent = p.prop_x+unitTag(p.unit_x)+' vs '+p.prop_y+unitTag(p.unit_y);
   const nc=d.curves.filter(c=>c.type!=='points').length, np=d.curves.length-nc;
@@ -182,6 +184,17 @@ function draw(){
   if(!xs.length){g.fillStyle='#5b7590';g.fillText('no data',P,H/2);return;}
   const xmin=Math.min(...xs),xmax=Math.max(...xs),ymin=Math.min(...ys),ymax=Math.max(...ys);
   const sx=v=>P+(W-P-20)*((tx(v)-xmin)/((xmax-xmin)||1)), sy=v=>H-P-(H-P-20)*((ty(v)-ymin)/((ymax-ymin)||1));
+  // corpus percentile band (p10–p90 + dashed median) behind everything
+  if(CUR.band && document.getElementById('band').checked){
+    const b=CUR.band;
+    g.beginPath();
+    b.x.forEach((x,j)=>{const X=sx(x),Y=sy(b.p90[j]); j?g.lineTo(X,Y):g.moveTo(X,Y);});
+    for(let j=b.x.length-1;j>=0;j--) g.lineTo(sx(b.x[j]),sy(b.p10[j]));
+    g.closePath(); g.fillStyle='rgba(159,182,207,0.28)'; g.fill();
+    g.beginPath(); g.setLineDash([5,4]); g.strokeStyle='#9fb6cf'; g.lineWidth=1.2;
+    b.x.forEach((x,j)=>{const X=sx(x),Y=sy(b.p50[j]); j?g.lineTo(X,Y):g.moveTo(X,Y);});
+    g.stroke(); g.setLineDash([]);
+  }
   // grid + axes
   g.strokeStyle='#eef2f7';g.lineWidth=1;
   for(let k=0;k<=5;k++){const y=H-P-(H-P-20)*k/5;g.beginPath();g.moveTo(P,y);g.lineTo(W-20,y);g.stroke();}
@@ -241,6 +254,7 @@ def explore_page():
   <div class="toolbar">
     <label class="ck"><input type="checkbox" id="logx" onchange="draw()">log x</label>
     <label class="ck"><input type="checkbox" id="logy" onchange="draw()">log y</label>
+    <label class="ck"><input type="checkbox" id="band" checked onchange="draw()">corpus band</label>
     <a id="dl" class="small" href="/ui/export.csv">&#8681; CSV of this plot</a>
   </div>
   <canvas id="cv" class="plot" style="width:100%;height:380px"></canvas>
@@ -309,16 +323,32 @@ def upload_page():
 
 
 
-def _svg_plot(curves):
+def _svg_plot(curves, band=None):
     pts = [p for c in curves for p in c["points"]]
     if not pts:
         return ""
     xs = [p[0] for p in pts]; ys = [p[1] for p in pts]
+    if band:                      # corpus band shares the axes
+        xs = xs + band["x"] + band["x"]
+        ys = ys + band["p10"] + band["p90"]
     xmin, xmax, ymin, ymax = min(xs), max(xs), min(ys), max(ys)
     W, H, P = 620, 280, 48
     sx = lambda v: P + (W - P - 18) * ((v - xmin) / (xmax - xmin) if xmax > xmin else 0.5)
     sy = lambda v: H - P - (H - P - 18) * ((v - ymin) / (ymax - ymin) if ymax > ymin else 0.5)
     marks, leg = [], []
+    if band:
+        # shaded p10–p90 envelope of the rest of the corpus + dashed median,
+        # drawn first so the record's own curves sit on top
+        ring = (list(zip(band["x"], band["p90"]))
+                + list(zip(band["x"][::-1], band["p10"][::-1])))
+        poly = " ".join(f"{sx(x):.1f},{sy(y):.1f}" for x, y in ring)
+        med = " ".join(f"{sx(x):.1f},{sy(y):.1f}"
+                       for x, y in zip(band["x"], band["p50"]))
+        marks.append(f'<polygon points="{poly}" fill="#dbe7f5" opacity="0.55"/>')
+        marks.append(f'<polyline points="{med}" fill="none" stroke="#9fb6cf" '
+                     f'stroke-width="1.2" stroke-dasharray="5 4"/>')
+        leg.append('<span><i style="background:#dbe7f5"></i>corpus p10–p90 '
+                   f'({band["n_records"]} other paper(s))</span>')
     for i, c in enumerate(curves):
         col = PALETTE[i % len(PALETTE)]
         sp = sorted(c["points"], key=lambda p: p[0])   # x order, no zig-zag
@@ -432,9 +462,74 @@ def _figures_card(pub):
     return f'<div class="card"><h2>Figures &amp; graphs ({len(figs)})</h2>{rows}</div>'
 
 
-def record_page(rec, curves, points, record_json):
+_FLAG_STYLE = {"ok":   ("#27ae60", "✓"),
+               "warn": ("#e67e22", "⚠"),
+               "fail": ("#e74c3c", "✗")}
+
+
+def _consistency_card(flags):
+    """Cross-property consistency check results (PF = S²σ, ZT = S²σT/κ):
+    the same-sample curves recomputed against each other."""
+    if not flags:
+        return ""
+    flags = sorted(flags, key=lambda f: ({"fail": 0, "warn": 1, "ok": 2}
+                                         .get(f.status, 3), f.sample))
+    rows = ""
+    for f in flags:
+        col, mark = _FLAG_STYLE.get(f.status, ("#5b7590", "?"))
+        rows += (f'<div style="margin:6px 0">'
+                 f'<b style="color:{col}">{mark} {esc(f.check_name)}</b> '
+                 f'<span class="muted small">[{esc(f.sample)}]</span> '
+                 f'<span style="color:{col}">{f.status}</span> '
+                 f'<span class="muted small">median deviation {f.median_dev:.0%} '
+                 f'over {f.n_points} points — {esc(f.detail)}</span></div>')
+    n_bad = sum(1 for f in flags if f.status != "ok")
+    note = ("all relations hold within digitization error" if n_bad == 0 else
+            "deviations like these usually mean a wrong axis unit/scale in the "
+            "digitization or in the paper itself — open the figure and check "
+            "the axis calibration")
+    return (f'<div class="card"><h2>Consistency checks ({len(flags)})</h2>'
+            f'<p class="muted small" style="margin-top:0">Thermoelectric relations '
+            f'recomputed from this record&rsquo;s own curves. {note}.</p>{rows}</div>')
+
+
+def _provenance_card(sid, entries):
+    """Digitization audit trail: the figure crops + calibration each curve
+    came from."""
+    if not entries:
+        return ""
+    tiles = ""
+    for e in entries:
+        cal = json.loads(e.calibration_json or "{}")
+        bits = []
+        if cal.get("x1_val") is not None and cal.get("x2_val") is not None:
+            log = " (log)" if cal.get("xIsLogScale") else ""
+            bits.append(f'x: {_fmt_num(cal["x1_val"])}–{_fmt_num(cal["x2_val"])}{log}')
+        if cal.get("y1_val") is not None and cal.get("y2_val") is not None:
+            log = " (log)" if cal.get("yIsLogScale") else ""
+            bits.append(f'y: {_fmt_num(cal["y1_val"])}–{_fmt_num(cal["y2_val"])}{log}')
+        ext = json.loads(e.extractor_json or "{}")
+        who = " · ".join(x for x in (
+            ext.get("app", ""), e.curator and f"curator: {e.curator}",
+            e.created_at[:10]) if x)
+        img = (f'<a href="/ui/provenance/{sid}/{e.id}.png" target="_blank">'
+               f'<img src="/ui/provenance/{sid}/{e.id}.png" loading="lazy" '
+               f'style="max-width:220px;max-height:160px;border:1px solid var(--line);'
+               f'border-radius:6px;background:#fff"></a>' if e.image_png else "")
+        page_no = f' <span class="muted small">p.{e.page}</span>' if e.page else ""
+        tiles += (f'<div style="display:inline-block;vertical-align:top;margin:6px 10px 6px 0;max-width:240px">'
+                  f'{img}<div class="small"><b>{esc(e.label)}</b>{page_no}</div>'
+                  f'<div class="muted small">{esc("; ".join(bits))}</div>'
+                  f'<div class="muted small">{esc(who)}</div></div>')
+    return (f'<div class="card"><h2>Digitization provenance ({len(entries)})</h2>'
+            f'<p class="muted small" style="margin-top:0">The source figure crops and '
+            f'axis calibrations these curves were extracted from — click a crop to '
+            f'compare it against the plots above.</p>{tiles}</div>')
+
+
+def record_page(rec, curves, points, record_json, flags=(), provenance=()):
     """rec: Record row; curves: GraphCurve rows; points: PointValue rows;
-    record_json: parsed KMDS dict."""
+    record_json: parsed KMDS dict; flags: QualityFlag rows."""
     pub = (record_json.get("metadata") or {}).get("publication") or {}
     # group curves by property pair + unit for plotting (a Hz sweep and a GHz
     # sweep of the same property are different plots)
@@ -443,13 +538,17 @@ def record_page(rec, curves, points, record_json):
         groups.setdefault((c.prop_x, c.prop_y, c.unit_x, c.unit_y), []).append(
             {"sample": c.sample_name, "composition": c.composition,
              "points": json.loads(c.points_json)})
+    from starrydata3.app import property_band
     plots = ""
     for (px, py, ux, uy), cs in groups.items():
+        band = property_band(px, py, ux, uy, exclude_sid=rec.sid)
         ux = f" ({ux})" if ux not in ("", "-") else ""
         uy = f" ({uy})" if uy not in ("", "-") else ""
+        note = ("" if not band else
+                " · shaded: where the rest of the database lies")
         plots += (f'<div class="card"><h2>{esc(px)}{esc(ux)} vs {esc(py)}{esc(uy)}</h2>'
-                  f'<div class="muted small">{len(cs)} curve(s), {sum(len(c["points"]) for c in cs)} points</div>'
-                  f'{_svg_plot(cs)}</div>')
+                  f'<div class="muted small">{len(cs)} curve(s), {sum(len(c["points"]) for c in cs)} points{note}</div>'
+                  f'{_svg_plot(cs, band)}</div>')
     if not plots:
         plots = ('<div class="card muted small">no digitized curves — digitize the '
                  'paper\'s PDF in AutoLineDigitizer and use its '
@@ -485,7 +584,8 @@ def record_page(rec, curves, points, record_json):
             f'<a href="/kmds/{rec.sid}"><b>full KMDS record</b></a> &nbsp;·&nbsp; '
             f'<a href="/explore">explore curves</a> &nbsp;·&nbsp; '
             f'<a href="/ui/record/{rec.sid}">raw KMDS JSON</a></div>')
-    body = (head + abstract + _points_cards(points) + plots + _tables_cards(pub)
+    body = (head + _consistency_card(flags) + abstract + _points_cards(points)
+            + plots + _provenance_card(rec.sid, provenance) + _tables_cards(pub)
             + samp_card + mat_card + _figures_card(pub))
     return layout(f"SID-{rec.sid}", "home", body)
 
@@ -513,7 +613,7 @@ def register_ui(app, engine, Record, GraphCurve, select, Session):
 
     @app.get("/view/{sid}", response_class=HTMLResponse)
     def _view(sid: int):
-        from starrydata3.app import PointValue
+        from starrydata3.app import PointValue, Provenance, QualityFlag
         with Session(engine) as s:
             rec = s.exec(select(Record).where(Record.sid == sid)).first()
             if not rec:
@@ -521,9 +621,11 @@ def register_ui(app, engine, Record, GraphCurve, select, Session):
                               f'<div class="card">No record SID-{sid}. <a href="/">back</a></div>')
             curves = s.exec(select(GraphCurve).where(GraphCurve.record_sid == sid)).all()
             points = s.exec(select(PointValue).where(PointValue.record_sid == sid)).all()
+            flags = s.exec(select(QualityFlag).where(QualityFlag.record_sid == sid)).all()
+            prov = s.exec(select(Provenance).where(Provenance.record_sid == sid)).all()
             record_json = json.loads(rec.record_json)
-            return record_page(rec, curves, points, record_json)
-
+            return record_page(rec, curves, points, record_json, flags, prov)
+ 
     @app.get("/kmds/{sid}", response_class=HTMLResponse)
     def _kmds_view(sid: int):
         """The full KMDS paper-record viewer (same renderer as AutoLineDigitizer's

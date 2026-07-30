@@ -29,7 +29,7 @@ from fastapi import Body, Depends, FastAPI, Header, HTTPException
 from fastapi.responses import HTMLResponse
 from sqlmodel import Field, Session, SQLModel, create_engine, select
 
-from starrydata3 import units
+from starrydata3 import checks, units
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
@@ -166,6 +166,36 @@ class Property(SQLModel, table=True):
     name: str = Field(index=True, unique=True)
     category: str = ""
     default_unit: str = ""
+
+
+class Provenance(SQLModel, table=True):
+    """The audit trail of one digitized figure: the source figure crop, the
+    axis calibration used, and which extractor produced it — so every stored
+    curve can be traced back to what the curator actually saw."""
+    id: Optional[int] = Field(default=None, primary_key=True)
+    record_sid: int = Field(index=True)
+    doi: str = Field(index=True)
+    label: str = ""                 # figure caption/name, e.g. "Fig 3b"
+    page: Optional[int] = None
+    image_png: bytes = b""          # the digitized figure crop
+    calibration_json: str = "{}"    # axis calibration (ticks, log flags, ...)
+    extractor_json: str = "{}"      # app + model versions
+    curator: str = ""
+    created_at: str = Field(default_factory=_now)
+
+
+class QualityFlag(SQLModel, table=True):
+    """Result of a cross-property consistency check on one sample's curves
+    (checks.py). Recomputed on every ingest of the record."""
+    id: Optional[int] = Field(default=None, primary_key=True)
+    record_sid: int = Field(index=True)
+    sample: str = ""
+    check_name: str = ""            # e.g. "ZT = S²σT/κ"
+    status: str = "ok"              # ok | warn | fail
+    median_dev: float = 0.0         # median relative deviation
+    n_points: int = 0
+    detail: str = ""
+    created_at: str = Field(default_factory=_now)
 
 
 # ---------------------------------------------------------------------------
@@ -625,12 +655,33 @@ def store_record(record: Dict[str, Any], strict: bool = False) -> Dict[str, Any]
                              kmds=cp is not None, unit_normalized=normed))
         s.commit()
 
+        # cross-property consistency checks (PF = S²σ, ZT = S²σT/κ, ...)
+        flags = run_checks(sid, s)
+
     return {"ok": True, "sid": sid, "doi": doi, "title": title,
             "n_violations": len(viol), "violations": viol[:20],
             "curves_indexed": len(curves),
             "kmds_curves": n_kmds, "unit_normalized_curves": n_norm,
             "points_indexed": len(pvs), "kmds_points": n_kmds_pts,
-            "non_kmds_properties": sorted(non_kmds)}
+            "non_kmds_properties": sorted(non_kmds),
+            "consistency_flags": flags}
+
+
+def run_checks(sid: int, s: Session) -> List[Dict[str, Any]]:
+    """Recompute a record's consistency flags from its indexed curves and
+    persist them (replacing older flags). Returns the flag dicts."""
+    rows = s.exec(select(GraphCurve).where(GraphCurve.record_sid == sid)).all()
+    flags = checks.check_curves(checks.curves_from_rows(rows))
+    for old in s.exec(select(QualityFlag)
+                      .where(QualityFlag.record_sid == sid)).all():
+        s.delete(old)
+    for f in flags:
+        s.add(QualityFlag(record_sid=sid, sample=f["sample"],
+                          check_name=f["check"], status=f["status"],
+                          median_dev=f["median_dev"],
+                          n_points=f["n_points"], detail=f["detail"]))
+    s.commit()
+    return flags
 
 
 def _digitization_stub(record: Dict[str, Any]) -> bool:
@@ -953,12 +1004,150 @@ def ui_graph(prop_x: str, prop_y: str, unit_x: Optional[str] = None,
             "unit_x": ux, "unit_y": uy, "curves": curves + pts}
 
 
+_MAX_PROV_IMAGE = 4 * 1024 * 1024   # 4 MB decoded — figure crops are ~100 KB
+
+
+@app.post("/api/v1/provenance")
+def submit_provenance(body: Dict[str, Any] = Body(...),
+                      key: APIKey = Depends(require_scope("write"))):
+    """Attach digitization provenance (figure crop + axis calibration +
+    extractor versions) to an existing record, keyed by DOI. Entries replace
+    older ones with the same figure label, so re-uploads stay clean."""
+    import base64
+    doi = (body.get("doi") or "").strip()
+    if not doi:
+        raise HTTPException(400, "provenance needs a doi")
+    figures = body.get("figures") or []
+    with Session(engine) as s:
+        rec = s.exec(select(Record).where(Record.doi == doi)).first()
+        if rec is None:
+            raise HTTPException(404, f"no record with DOI {doi}")
+        stored = 0
+        for f in figures:
+            label = (f.get("label") or "").strip() or f"figure {stored + 1}"
+            png = b""
+            if f.get("png_b64"):
+                try:
+                    png = base64.b64decode(f["png_b64"])
+                except Exception:
+                    raise HTTPException(400, f"figure {label!r}: bad png_b64")
+                if len(png) > _MAX_PROV_IMAGE:
+                    raise HTTPException(413, f"figure {label!r}: image too large")
+            for old in s.exec(select(Provenance)
+                              .where(Provenance.record_sid == rec.sid,
+                                     Provenance.label == label)).all():
+                s.delete(old)
+            s.add(Provenance(
+                record_sid=rec.sid, doi=doi, label=label,
+                page=f.get("page"), image_png=png,
+                calibration_json=json.dumps(f.get("calibration") or {}),
+                extractor_json=json.dumps(f.get("extractor") or {}),
+                curator=(f.get("curator") or "")[:100]))
+            stored += 1
+        sid = rec.sid
+        s.commit()
+    return {"ok": True, "sid": sid, "doi": doi, "figures_stored": stored}
+
+
+@app.get("/ui/provenance/{sid}")
+def ui_provenance(sid: int):
+    """A record's provenance entries (metadata only — images by id)."""
+    with Session(engine) as s:
+        rows = s.exec(select(Provenance)
+                      .where(Provenance.record_sid == sid)).all()
+    return {"sid": sid, "entries": [
+        {"id": r.id, "label": r.label, "page": r.page,
+         "calibration": json.loads(r.calibration_json or "{}"),
+         "extractor": json.loads(r.extractor_json or "{}"),
+         "curator": r.curator, "created_at": r.created_at,
+         "has_image": bool(r.image_png)} for r in rows]}
+
+
+@app.get("/ui/provenance/{sid}/{pid}.png")
+def ui_provenance_image(sid: int, pid: int):
+    from fastapi.responses import Response
+    with Session(engine) as s:
+        row = s.get(Provenance, pid)
+    if row is None or row.record_sid != sid or not row.image_png:
+        raise HTTPException(404, "no such provenance image")
+    return Response(content=row.image_png, media_type="image/png",
+                    headers={"Cache-Control": "max-age=86400"})
+
+
+def _percentile(sorted_vals: List[float], q: float) -> float:
+    """Linear-interpolated percentile of an ascending list (q in 0..1)."""
+    n = len(sorted_vals)
+    if n == 1:
+        return sorted_vals[0]
+    pos = q * (n - 1)
+    lo = int(pos)
+    hi = min(lo + 1, n - 1)
+    return sorted_vals[lo] + (sorted_vals[hi] - sorted_vals[lo]) * (pos - lo)
+
+
+def property_band(prop_x: str, prop_y: str, unit_x: str = "", unit_y: str = "",
+                  exclude_sid: Optional[int] = None, n_bins: int = 40
+                  ) -> Optional[Dict[str, Any]]:
+    """Percentile envelope (p10/p50/p90 per x-bin) of EVERY stored curve of a
+    property pair — the corpus a new curve should be judged against. A curve
+    lying far outside the band usually means a wrong axis unit or scale.
+    Returns None when fewer than 2 other records contribute."""
+    with Session(engine) as s:
+        q = select(GraphCurve).where(
+            GraphCurve.prop_x == prop_x, GraphCurve.prop_y == prop_y)
+        if unit_x:
+            q = q.where(GraphCurve.unit_x == unit_x)
+        if unit_y:
+            q = q.where(GraphCurve.unit_y == unit_y)
+        rows = s.exec(q).all()
+    rows = [r for r in rows if r.record_sid != exclude_sid]
+    if len({r.record_sid for r in rows}) < 2:
+        return None
+    pts = []
+    for r in rows:
+        pts.extend([p for p in json.loads(r.points_json or "[]") if len(p) >= 2])
+    if len(pts) < n_bins:
+        return None
+    xmin = min(p[0] for p in pts)
+    xmax = max(p[0] for p in pts)
+    if xmax <= xmin:
+        return None
+    width = (xmax - xmin) / n_bins
+    bins: List[List[float]] = [[] for _ in range(n_bins)]
+    for x, y in ((p[0], p[1]) for p in pts):
+        i = min(int((x - xmin) / width), n_bins - 1)
+        bins[i].append(y)
+    out = {"x": [], "p10": [], "p50": [], "p90": []}
+    for i, ys in enumerate(bins):
+        if len(ys) < 3:
+            continue
+        ys.sort()
+        out["x"].append(xmin + (i + 0.5) * width)
+        out["p10"].append(_percentile(ys, 0.10))
+        out["p50"].append(_percentile(ys, 0.50))
+        out["p90"].append(_percentile(ys, 0.90))
+    if len(out["x"]) < 2:
+        return None
+    return {**out, "n_curves": len(rows),
+            "n_records": len({r.record_sid for r in rows})}
+
+
+@app.get("/ui/band")
+def ui_band(prop_x: str, prop_y: str, unit_x: str = "", unit_y: str = "",
+            exclude_sid: Optional[int] = None):
+    """Corpus percentile band for a property pair (see property_band)."""
+    band = property_band(prop_x, prop_y, unit_x, unit_y, exclude_sid)
+    return band or {"x": [], "n_curves": 0, "n_records": 0}
+
+
 @app.get("/ui/record_points/{sid}")
 def ui_record_points(sid: int):
     """A record's measured values grouped per property — feeds the per-paper
     property charts on the record page."""
     with Session(engine) as s:
         rows = s.exec(select(PointValue).where(PointValue.record_sid == sid)).all()
+        flag_rows = s.exec(select(QualityFlag)
+                           .where(QualityFlag.record_sid == sid)).all()
     groups: Dict[tuple, Dict[str, Any]] = {}
     for p in rows:
         g = groups.setdefault((p.prop, p.unit, p.source), {
@@ -966,8 +1155,15 @@ def ui_record_points(sid: int):
             "kmds": p.kmds, "category": p.category, "entries": []})
         g["entries"].append({"entity": p.entity, "value": p.value,
                              "env_temperature": p.env_temperature})
+    order = {"fail": 0, "warn": 1, "ok": 2}
+    flags = sorted(({"sample": f.sample, "check": f.check_name,
+                     "status": f.status, "median_dev": f.median_dev,
+                     "n_points": f.n_points, "detail": f.detail}
+                    for f in flag_rows),
+                   key=lambda f: (order.get(f["status"], 3), f["sample"]))
     return {"sid": sid, "groups": sorted(groups.values(),
-                                         key=lambda g: (not g["kmds"], g["prop"]))}
+                                         key=lambda g: (not g["kmds"], g["prop"])),
+            "consistency": flags}
 
 
 def _csv_response(rows: List[List[Any]], filename: str):
