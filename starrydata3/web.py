@@ -83,6 +83,9 @@ def layout(title, active, body, extra_js=""):
         f'<a href="{href}" class="{"on" if active==key else ""}">{label}</a>'
         for key, href, label in [("home", "/", "Database"),
                                   ("explore", "/explore", "Explore"),
+                                  ("materials", "/materials", "Materials"),
+                                  ("find", "/find", "Find"),
+                                  ("queue", "/queue", "Queue"),
                                   ("upload", "/upload", "Upload"),
                                   ("api", "/docs", "API")])
     return HTMLResponse(f"""<!doctype html><html lang="en"><head><meta charset="utf-8">
@@ -590,6 +593,155 @@ def record_page(rec, curves, points, record_json, flags=(), provenance=()):
     return layout(f"SID-{rec.sid}", "home", body)
 
 
+MATERIALS_JS = """
+async function init(){
+  const d = await (await fetch('/ui/materials')).json();
+  const el = document.getElementById('mats');
+  if(!d.count){el.innerHTML='<div class="card muted">No normalized compositions yet — '
+    +'materials appear here once curves carry parseable chemical formulas.</div>';return;}
+  el.innerHTML = d.materials.map(m=>`<div class="card">
+    <h2><a href="/material/${encodeURIComponent(m.comp_key)}">${m.comp_key}</a></h2>
+    <div class="muted small">elements: ${m.elements} · ${m.records.length} paper(s) · ${m.n_curves} curve(s)</div>
+    <div style="margin:6px 0">${m.properties.map(p=>'<span class="chip">'+p+'</span>').join('')}</div>
+    <div class="muted small">as written: ${m.compositions.join(' · ')}</div>
+  </div>`).join('');
+}
+init();
+"""
+
+
+def materials_page():
+    body = """
+<div class="card"><h1>Materials</h1>
+<p class="muted" style="margin-top:0">Every normalized composition in the database —
+one dossier per material family, regardless of which paper the curves came from.</p></div>
+<div id="mats"></div>"""
+    return layout("Materials", "materials", body, MATERIALS_JS)
+
+
+FIND_JS = """
+async function go(){
+  const qs = new URLSearchParams();
+  qs.set('prop', document.getElementById('fprop').value.trim());
+  for (const [id,key] of [['fvmin','vmin'],['fvmax','vmax'],['fxmin','xmin'],['fxmax','xmax']]){
+    const v = document.getElementById(id).value.trim(); if(v) qs.set(key, v);
+  }
+  const el = document.getElementById('felem').value.trim(); if(el) qs.set('element', el);
+  const d = await (await fetch('/ui/facet?'+qs)).json();
+  const out = document.getElementById('fout');
+  if(!d.count){out.innerHTML='<div class="muted">No matching curves.</div>';return;}
+  out.innerHTML = '<div class="muted small">'+d.count+' matching curve(s)</div>'
+    +'<div style="overflow-x:auto"><table><thead><tr><th>best value</th><th>at</th>'
+    +'<th>sample</th><th>material</th><th>paper</th></tr></thead><tbody>'
+    +d.hits.map(h=>`<tr><td><b>${(+h.best_value.toPrecision(4))}</b> ${h.unit||''}</td>`
+      +`<td>${(+h.best_x.toPrecision(4))}</td>`
+      +`<td>${h.sample}</td>`
+      +`<td>${h.comp_key?('<a href="/material/'+encodeURIComponent(h.comp_key)+'">'+h.comp_key+'</a>'):'—'}</td>`
+      +`<td><a href="/view/${h.sid}">SID-${h.sid}</a></td></tr>`).join('')
+    +'</tbody></table></div>';
+}
+document.getElementById('fgo').onclick = go;
+"""
+
+
+def find_page():
+    body = """
+<div class="card"><h1>Find</h1>
+<p class="muted" style="margin-top:0">Range-at-condition search over every digitized curve:
+&ldquo;which samples reach a property value in this window?&rdquo;</p>
+<div style="display:flex;gap:10px;flex-wrap:wrap;align-items:end">
+  <label class="small">property<br><input class="search" id="fprop" value="ZT" style="width:180px"></label>
+  <label class="small">value ≥<br><input class="search" id="fvmin" style="width:90px" placeholder="1"></label>
+  <label class="small">value ≤<br><input class="search" id="fvmax" style="width:90px"></label>
+  <label class="small">x from<br><input class="search" id="fxmin" style="width:90px" placeholder="500"></label>
+  <label class="small">x to<br><input class="search" id="fxmax" style="width:90px" placeholder="700"></label>
+  <label class="small">elements<br><input class="search" id="felem" style="width:110px" placeholder="Te, Bi"></label>
+  <button id="fgo" class="pairbtn on" style="cursor:pointer">Search</button>
+</div>
+<p class="muted small">x is the condition axis (temperature by default). Elements must all be present.</p>
+</div>
+<div class="card" id="fout"><div class="muted">Set a filter and search.</div></div>"""
+    return layout("Find", "find", body, FIND_JS)
+
+
+def material_page(key, curves, titles):
+    """Dossier: every curve of one normalized composition, across papers."""
+    groups = {}
+    for c in curves:
+        groups.setdefault((c.prop_x, c.prop_y, c.unit_x, c.unit_y), []).append(
+            {"sample": f"{c.sample_name} · SID-{c.record_sid}",
+             "composition": c.composition, "points": json.loads(c.points_json)})
+    plots = ""
+    for (px, py, ux, uy), cs in sorted(groups.items(), key=lambda kv: kv[0][1]):
+        uxs = f" ({ux})" if ux not in ("", "-") else ""
+        uys = f" ({uy})" if uy not in ("", "-") else ""
+        plots += (f'<div class="card"><h2>{esc(py)}{esc(uys)} vs {esc(px)}{esc(uxs)}</h2>'
+                  f'<div class="muted small">{len(cs)} curve(s)</div>{_svg_plot(cs)}</div>')
+    sids = sorted({c.record_sid for c in curves})
+    papers = "".join(f'<li><a href="/view/{sid}">SID-{sid}</a> '
+                     f'{esc(titles.get(sid, ""))}</li>' for sid in sids)
+    els = curves[0].elements if curves else ""
+    head = (f'<div class="card"><div class="muted small">material dossier · elements: {esc(els)}</div>'
+            f'<h1>{esc(key)}</h1>'
+            f'<a href="/materials">&larr; all materials</a></div>')
+    return layout(key, "materials",
+                  head + plots + f'<div class="card"><h2>Source papers ({len(sids)})</h2><ul>{papers}</ul></div>')
+
+
+QUEUE_JS = """
+async function load(){
+  const d = await (await fetch('/ui/queue')).json();
+  document.getElementById('qmeta').textContent =
+    d.queued+' queued · '+d.digitized+' digitized';
+  const rows = d.papers.map(p=>`<tr>
+    <td>${p.status==='queued'
+        ? '<span class="chip" style="background:#fdf3e3;color:#9a6a00">queued</span>'
+        : '<a href="/view/'+p.sid+'"><span class="chip" style="background:#e3f3ea;color:#17804b">SID-'+p.sid+'</span></a>'}</td>
+    <td><a href="https://doi.org/${encodeURIComponent(p.doi)}" target="_blank">${p.doi}</a></td>
+    <td>${p.title||'<span class=muted>(bibliography pending)</span>'}
+        <div class="muted small">${[p.authors, p.journal, p.year].filter(Boolean).join(' · ')}</div></td>
+    <td class="muted small">${p.project}</td></tr>`).join('');
+  document.getElementById('qbody').innerHTML = rows ||
+    '<tr><td colspan="4" class="muted">Queue is empty — paste DOIs above.</td></tr>';
+}
+document.getElementById('qadd').onclick = async ()=>{
+  const dois = document.getElementById('qdois').value.split(/\\s+/).filter(Boolean);
+  const key = document.getElementById('qkey').value.trim();
+  const out = document.getElementById('qout');
+  if(!dois.length||!key){out.textContent='Paste DOIs and the API key first.';return;}
+  out.textContent = 'Registering '+dois.length+' DOI(s)…';
+  const r = await fetch('/api/v1/queue', {method:'POST',
+    headers:{'Content-Type':'application/json','X-API-Key':key},
+    body: JSON.stringify({dois, project: document.getElementById('qproj').value.trim()||'default'})});
+  const d = await r.json();
+  out.textContent = r.ok ? ('Added '+d.added.length+', skipped '+d.skipped_existing.length+' already queued.')
+                         : ('Failed: '+JSON.stringify(d.detail||d));
+  if(r.ok){document.getElementById('qdois').value='';load();}
+};
+load();
+"""
+
+
+def queue_page():
+    body = """
+<div class="card"><h1>Paper queue</h1>
+<p class="muted" style="margin-top:0">Paste DOIs to register papers for digitization —
+bibliography is fetched from CrossRef, and each paper flips to its SID automatically
+when its record is uploaded.</p>
+<textarea id="qdois" class="search" style="width:100%;height:70px" placeholder="one DOI per line"></textarea>
+<div style="display:flex;gap:10px;margin-top:8px;flex-wrap:wrap">
+  <input class="search" id="qproj" placeholder="project (default)" style="max-width:200px">
+  <input class="search" id="qkey" type="password" placeholder="API key (sd3_…)" style="max-width:260px">
+  <button id="qadd" class="pairbtn on" style="cursor:pointer">Add to queue</button>
+  <span id="qout" class="muted small" style="align-self:center"></span>
+</div></div>
+<div class="card"><h2>Papers <span class="muted small" id="qmeta"></span></h2>
+<div style="overflow-x:auto"><table><thead>
+<tr><th>status</th><th>DOI</th><th>paper</th><th>project</th></tr></thead>
+<tbody id="qbody"></tbody></table></div></div>"""
+    return layout("Queue", "queue", body, QUEUE_JS)
+
+
 def register_ui(app, engine, Record, GraphCurve, select, Session):
     @app.get("/", response_class=HTMLResponse)
     def _home():
@@ -602,6 +754,30 @@ def register_ui(app, engine, Record, GraphCurve, select, Session):
     @app.get("/upload", response_class=HTMLResponse)
     def _upload():
         return upload_page()
+
+    @app.get("/materials", response_class=HTMLResponse)
+    def _materials():
+        return materials_page()
+
+    @app.get("/find", response_class=HTMLResponse)
+    def _find():
+        return find_page()
+
+    @app.get("/queue", response_class=HTMLResponse)
+    def _queue():
+        return queue_page()
+
+    @app.get("/material/{key}", response_class=HTMLResponse)
+    def _material(key: str):
+        with Session(engine) as s:
+            curves = s.exec(select(GraphCurve)
+                            .where(GraphCurve.comp_key == key)).all()
+            titles = {r.sid: r.title for r in s.exec(select(Record)).all()}
+        if not curves:
+            return layout("not found", "materials",
+                          f'<div class="card">No material {esc(key)}. '
+                          f'<a href="/materials">back</a></div>')
+        return material_page(key, curves, titles)
 
     @app.get("/ui/record/{sid}")
     def _raw(sid: int):

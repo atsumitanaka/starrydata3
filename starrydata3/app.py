@@ -29,7 +29,7 @@ from fastapi import Body, Depends, FastAPI, Header, HTTPException
 from fastapi.responses import HTMLResponse
 from sqlmodel import Field, Session, SQLModel, create_engine, select
 
-from starrydata3 import checks, units
+from starrydata3 import checks, composition, units
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
@@ -138,6 +138,8 @@ class GraphCurve(SQLModel, table=True):
     n_points: int = 0
     kmds: bool = True          # both axis properties are in the KMDS vocabulary
     unit_normalized: bool = False  # x and/or y were converted to canonical units
+    comp_key: str = Field(default="", index=True)  # canonical composition key
+    elements: str = ""             # space-separated element symbols, sorted
 
 
 class PointValue(SQLModel, table=True):
@@ -182,6 +184,20 @@ class Provenance(SQLModel, table=True):
     extractor_json: str = "{}"      # app + model versions
     curator: str = ""
     created_at: str = Field(default_factory=_now)
+
+
+class Paper(SQLModel, table=True):
+    """The digitization work queue: papers registered by DOI (bibliography
+    auto-fetched from CrossRef) and tracked from queued → digitized."""
+    id: Optional[int] = Field(default=None, primary_key=True)
+    doi: str = Field(index=True, unique=True)
+    title: str = ""
+    journal: str = ""
+    year: Optional[int] = None
+    authors: str = ""
+    project: str = "default"
+    status: str = "queued"          # queued | digitized
+    added_at: str = Field(default_factory=_now)
 
 
 class QualityFlag(SQLModel, table=True):
@@ -373,7 +389,8 @@ def extract_curves(record: Dict[str, Any]) -> List[Dict[str, Any]]:
         comps = [c.get("name") for c in (smp.get("components") or []) if c.get("name")]
         sample_names[smp.get("sample local id")] = {
             "name": smp.get("name") or (comps[0] if comps else ""),
-            "composition": smp.get("name") or "; ".join(comps)}
+            "composition": smp.get("name") or "; ".join(comps),
+            "components": comps}
     donors = _collect_donors(pub)
     curves, seen = [], set()
 
@@ -413,10 +430,13 @@ def extract_curves(record: Dict[str, Any]) -> List[Dict[str, Any]]:
                 if len(linked) == len(series) and i < len(linked) and linked[i] in sample_names:
                     nm = sample_names[linked[i]]
                     sname, comp = nm["name"], nm["composition"]
+                    components = nm["components"]
                 else:
                     sname = sers.get("label") or f"Line {i + 1}"
                     comp = sname
+                    components = []
                 curves.append({"sample_name": sname, "composition": comp,
+                               "components": components,
                                "prop_x": xt, "prop_y": yt,
                                "unit_x": sanitize_unit(xa.get("unit")),
                                "unit_y": sanitize_unit(ya.get("unit")),
@@ -541,6 +561,15 @@ app = FastAPI(title="Starrydata3", version="0.0.1",
 
 def init_db():
     SQLModel.metadata.create_all(engine)
+    # additive migrations for columns create_all won't add to existing tables
+    from sqlalchemy import text
+    with engine.connect() as conn:
+        cols = {r[1] for r in conn.execute(text("PRAGMA table_info(graphcurve)"))}
+        for col, decl in (("comp_key", "VARCHAR DEFAULT ''"),
+                          ("elements", "VARCHAR DEFAULT ''")):
+            if col not in cols:
+                conn.execute(text(f"ALTER TABLE graphcurve ADD COLUMN {col} {decl}"))
+        conn.commit()
 
 
 @app.get("/health")
@@ -586,6 +615,12 @@ def store_record(record: Dict[str, Any], strict: bool = False) -> Dict[str, Any]
         s.add(rec); s.commit(); s.refresh(rec)
         sid, title = rec.sid, rec.title    # capture before the session closes
 
+        # the paper queue tracks digitization progress by DOI
+        qp = s.exec(select(Paper).where(Paper.doi == doi)).first()
+        if qp and qp.status != "digitized":
+            qp.status = "digitized"
+            s.add(qp); s.commit()
+
         # re-index curves for this record
         for old in s.exec(select(GraphCurve).where(GraphCurve.record_sid == sid)).all():
             s.delete(old)
@@ -627,12 +662,18 @@ def store_record(record: Dict[str, Any], strict: bool = False) -> Dict[str, Any]
                    if (fx != 1.0 or fy != 1.0) else raw)
             n_kmds += 1 if is_kmds else 0
             n_norm += 1 if normed else 0
+            ck, els = "", ""
+            for cand in ([c["composition"] or c["sample_name"]]
+                         + (c.get("components") or [])):
+                ck, els = composition.comp_key(cand)
+                if ck:
+                    break
             s.add(GraphCurve(record_sid=sid, doi=doi, sample_name=c["sample_name"],
                              composition=c["composition"],
                              prop_x=cx or c["prop_x"], prop_y=cy or c["prop_y"],
                              unit_x=ux, unit_y=uy, kmds=is_kmds, unit_normalized=normed,
                              points_json=json.dumps(pts), raw_points_json=json.dumps(raw),
-                             n_points=len(pts)))
+                             n_points=len(pts), comp_key=ck, elements=els))
 
         # re-index single measured values (material property trees + tables)
         for old in s.exec(select(PointValue).where(PointValue.record_sid == sid)).all():
@@ -1002,6 +1043,143 @@ def ui_graph(prop_x: str, prop_y: str, unit_x: Optional[str] = None,
     uy = rows[0].unit_y if rows else (pts[0].get("unit_y", "") if pts else (unit_y or ""))
     return {"prop_x": prop_x, "prop_y": prop_y, "count": len(curves) + len(pts),
             "unit_x": ux, "unit_y": uy, "curves": curves + pts}
+
+
+def _crossref_meta(doi: str) -> Dict[str, Any]:
+    """Bibliography for a DOI from the CrossRef API; empty fields on any
+    failure so queueing never blocks on the network."""
+    try:
+        import httpx
+        r = httpx.get(f"https://api.crossref.org/works/{doi}",
+                      timeout=15.0,
+                      headers={"User-Agent": "starrydata3 (mailto:kmds@local)"})
+        r.raise_for_status()
+        m = r.json().get("message") or {}
+        authors = ", ".join(
+            " ".join(x for x in (a.get("given"), a.get("family")) if x)
+            for a in (m.get("author") or [])[:12])
+        year = None
+        for k in ("published-print", "published-online", "issued"):
+            parts = ((m.get(k) or {}).get("date-parts") or [[None]])[0]
+            if parts and parts[0]:
+                year = int(parts[0])
+                break
+        return {"title": " ".join(m.get("title") or [])[:500],
+                "journal": " ".join(m.get("container-title") or [])[:200],
+                "year": year, "authors": authors[:500]}
+    except Exception:
+        return {"title": "", "journal": "", "year": None, "authors": ""}
+
+
+@app.post("/api/v1/queue")
+def queue_papers(body: Dict[str, Any] = Body(...),
+                 key: APIKey = Depends(require_scope("write"))):
+    """Register papers to digitize by DOI list; CrossRef fills the
+    bibliography. DOIs already queued are skipped; DOIs already in the
+    database come in as digitized."""
+    dois = [d.strip() for d in (body.get("dois") or []) if d and d.strip()]
+    if not dois:
+        raise HTTPException(400, "no dois given")
+    project = (body.get("project") or "default").strip() or "default"
+    added, skipped = [], []
+    with Session(engine) as s:
+        have_records = {r.doi for r in s.exec(select(Record)).all()}
+        for doi in dois:
+            doi = doi.removeprefix("https://doi.org/").removeprefix("doi:")
+            if s.exec(select(Paper).where(Paper.doi == doi)).first():
+                skipped.append(doi)
+                continue
+            meta = _crossref_meta(doi)
+            s.add(Paper(doi=doi, project=project,
+                        status="digitized" if doi in have_records else "queued",
+                        **meta))
+            added.append(doi)
+        s.commit()
+    return {"ok": True, "added": added, "skipped_existing": skipped}
+
+
+@app.get("/ui/queue")
+def ui_queue():
+    with Session(engine) as s:
+        papers = s.exec(select(Paper)).all()
+        have = {r.doi: r.sid for r in s.exec(select(Record)).all()}
+    rows = [{"doi": p.doi, "title": p.title, "journal": p.journal,
+             "year": p.year, "authors": p.authors, "project": p.project,
+             "status": "digitized" if p.doi in have else p.status,
+             "sid": have.get(p.doi), "added_at": p.added_at[:10]}
+            for p in papers]
+    rows.sort(key=lambda r: (r["status"] != "queued", r["added_at"]))
+    n_q = sum(1 for r in rows if r["status"] == "queued")
+    return {"count": len(rows), "queued": n_q, "digitized": len(rows) - n_q,
+            "papers": rows}
+
+
+@app.get("/ui/materials")
+def ui_materials():
+    """Every normalized composition in the database with its coverage — the
+    per-material dossier index."""
+    with Session(engine) as s:
+        rows = s.exec(select(GraphCurve).where(GraphCurve.comp_key != "")).all()
+    mats: Dict[str, Dict[str, Any]] = {}
+    for r in rows:
+        m = mats.setdefault(r.comp_key, {
+            "comp_key": r.comp_key, "elements": r.elements,
+            "compositions": set(), "records": set(), "properties": set(),
+            "n_curves": 0})
+        m["compositions"].add(r.composition or r.sample_name)
+        m["records"].add(r.record_sid)
+        m["properties"].add(r.prop_y)
+        m["n_curves"] += 1
+    out = [{**m, "compositions": sorted(m["compositions"])[:6],
+            "records": sorted(m["records"]),
+            "properties": sorted(m["properties"])}
+           for m in mats.values()]
+    out.sort(key=lambda m: (-len(m["records"]), m["comp_key"]))
+    return {"count": len(out), "materials": out}
+
+
+@app.get("/ui/facet")
+def ui_facet(prop: str, vmin: Optional[float] = None, vmax: Optional[float] = None,
+             xmin: Optional[float] = None, xmax: Optional[float] = None,
+             element: str = "", prop_x: str = "temperature"):
+    """Range-at-condition search over digitized curves: e.g. curves of `prop`
+    (ZT) whose value is within [vmin, vmax] somewhere in the x-window
+    [xmin, xmax] (500–700 K), optionally containing `element` (Te).
+    Returns the matching curves with their best value in the window."""
+    els = [e.strip().capitalize() for e in element.replace(",", " ").split()
+           if e.strip()]
+    with Session(engine) as s:
+        q = select(GraphCurve).where(GraphCurve.prop_y == prop)
+        if prop_x:
+            q = q.where(GraphCurve.prop_x == prop_x)
+        rows = s.exec(q).all()
+        titles = {r.sid: r.title for r in s.exec(select(Record)).all()}
+    hits = []
+    for r in rows:
+        if els:
+            have = set((r.elements or "").split())
+            if not all(e in have for e in els):
+                continue
+        pts = [p for p in json.loads(r.points_json or "[]") if len(p) >= 2]
+        window = [p for p in pts
+                  if (xmin is None or p[0] >= xmin)
+                  and (xmax is None or p[0] <= xmax)]
+        if not window:
+            continue
+        matching = [p for p in window
+                    if (vmin is None or p[1] >= vmin)
+                    and (vmax is None or p[1] <= vmax)]
+        if not matching:
+            continue
+        best = max(matching, key=lambda p: p[1])
+        hits.append({"sid": r.record_sid, "doi": r.doi,
+                     "title": titles.get(r.record_sid, ""),
+                     "sample": r.sample_name, "composition": r.composition,
+                     "comp_key": r.comp_key, "unit": r.unit_y,
+                     "best_value": best[1], "best_x": best[0],
+                     "n_matching_points": len(matching)})
+    hits.sort(key=lambda h: -h["best_value"])
+    return {"prop": prop, "prop_x": prop_x, "count": len(hits), "hits": hits}
 
 
 _MAX_PROV_IMAGE = 4 * 1024 * 1024   # 4 MB decoded — figure crops are ~100 KB
