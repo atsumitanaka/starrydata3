@@ -233,3 +233,42 @@ def test_review_portal_roundtrip(client, wkey):
     assert dd["series"][0]["points_data"]
     x0, y0 = dd["series"][0]["points_data"][0]
     assert 300 <= x0 <= 800 and 0 <= y0 <= 2
+
+
+def test_assist_proxy(client, wkey, monkeypatch):
+    import base64
+    import threading
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+    import starrydata3.app as appmod
+
+    class FakeSidecar(BaseHTTPRequestHandler):
+        def do_POST(self):
+            n = int(self.headers["Content-Length"])
+            body = json.loads(self.rfile.read(n))
+            assert body.get("png_b64")
+            out = json.dumps({"op": self.path, "echo_series":
+                              body.get("series_px")}).encode()
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(out)))
+            self.end_headers()
+            self.wfile.write(out)
+
+        def log_message(self, *a):
+            pass
+
+    srv = HTTPServer(("127.0.0.1", 0), FakeSidecar)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    monkeypatch.setattr(appmod, "ASSIST_URL",
+                        f"http://127.0.0.1:{srv.server_port}")
+    # find a review figure from the earlier roundtrip session
+    figs = client.get("/ui/review/sessions").json()["sessions"]
+    full = client.get(f"/ui/review/session/{figs[0]['id']}").json()
+    fid = full["figures"][0]["fid"]
+    r = client.post("/api/v1/assist/scatter",
+                    json={"fid": fid, "series_px": [[[1, 2]]]},
+                    headers={"X-API-Key": wkey})
+    assert r.status_code == 200 and r.json()["op"] == "/scatter"
+    assert r.json()["echo_series"] == [[[1, 2]]]
+    assert client.post("/api/v1/assist/nope", json={"fid": fid},
+                       headers={"X-API-Key": wkey}).status_code == 404
+    srv.shutdown()

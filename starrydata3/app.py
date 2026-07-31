@@ -1262,6 +1262,40 @@ def push_review_session(body: Dict[str, Any] = Body(...),
         return {"ok": True, "session_id": sess.id, "figures": len(figures)}
 
 
+ASSIST_URL = os.environ.get("SD3_ASSIST_URL", "http://127.0.0.1:8390")
+_ASSIST_OPS = {"axes", "scatter", "label", "fix_axes", "verify"}
+
+
+@app.post("/api/v1/assist/{op}")
+def assist(op: str, body: Dict[str, Any] = Body(...),
+           key: APIKey = Depends(require_scope("write"))):
+    """Proxy a figure-editor assist request (axis detection, scatter
+    detection, AI labelling/verification) to the AutoLineDigitizer compute
+    sidecar — the server itself stays ML-free."""
+    import base64
+    if op not in _ASSIST_OPS:
+        raise HTTPException(404, f"unknown assist op {op!r}")
+    fid = body.get("fid")
+    with Session(engine) as s:
+        f = s.get(ReviewFigure, int(fid)) if fid is not None else None
+    if f is None or not f.image_png:
+        raise HTTPException(404, "figure (or its image) not found")
+    payload = {"png_b64": base64.b64encode(f.image_png).decode()}
+    if "series_px" in body:
+        payload["series_px"] = body["series_px"]
+    try:
+        import httpx
+        r = httpx.post(f"{ASSIST_URL}/{op}", json=payload, timeout=600)
+        r.raise_for_status()
+        return r.json()
+    except httpx.ConnectError:
+        raise HTTPException(503, "assist sidecar is not running — start it "
+                                 "with: python src/assist_server.py "
+                                 "(AutoLineDigitizer)")
+    except httpx.HTTPStatusError as e:
+        raise HTTPException(502, f"assist failed: {e.response.text[:300]}")
+
+
 @app.get("/ui/review/sessions")
 def ui_review_sessions():
     with Session(engine) as s:

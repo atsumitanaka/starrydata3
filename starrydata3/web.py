@@ -817,7 +817,7 @@ function delSeries(i){
 function drawFig(){
   if(!cur || !cur._img) return;
   const cv = $('cv'), img = cur._img;
-  const scale = Math.min(1, 860/img.width);
+  const scale = Math.min(1, 860/img.width) * (cv._zoom||1);
   cv.width = img.width*scale; cv.height = img.height*scale;
   cv._scale = scale;
   const g = cv.getContext('2d');
@@ -886,9 +886,58 @@ async function approveAll(){
     ? ('✅ ingested as <a href="/view/'+r.data.sid+'"><b>SID-'+r.data.sid+'</b></a>')
     : ('approve failed: '+JSON.stringify(r.data.detail||r.data));
 }
+async function assist(op, extra, apply){
+  $('amsg').textContent = op+'…';
+  const body = Object.assign({fid: cur.fid}, extra||{});
+  const r = await api('/api/v1/assist/'+op, 'POST', body);
+  if (!r.ok){ $('amsg').textContent = (r.data.detail||'failed'); return; }
+  apply(r.data); drawFig(); seriesList();
+  $('amsg').textContent = op+' ✓';
+}
+function doAxes(){ assist('axes', null, d=>{
+  if (d.axis_config){ cur.state.axis_config = d.axis_config;
+    for (const k of ['x1_val','x2_val','y1_val','y2_val'])
+      if (d.axis_config[k]!==undefined) $(k).value = d.axis_config[k];
+    $('logx').checked = !!d.axis_config.xIsLogScale;
+    $('logy').checked = !!d.axis_config.yIsLogScale; }
+  if (d.x_name) $('fx').value = d.x_name;
+  if (d.y_name) $('fy').value = d.y_name;
+});}
+function doScatter(){ assist('scatter', null, d=>{
+  (d.series_px||[]).forEach((s,i)=>{
+    cur.state.series_px.push(s);
+    (cur.state.series_names=cur.state.series_names||[]).push('Scatter '+(i+1)); });
+});}
+function doLabel(){ assist('label', {series_px: cur.state.series_px}, d=>{
+  (d.names||[]).forEach((n,i)=>{ if(n) cur.state.series_names[i]=n; });
+});}
+function doAiAxes(){ assist('fix_axes', null, d=>{
+  const a = d.axes||{};
+  if ((a.x_axis||{}).name) $('fx').value = a.x_axis.name +
+    ((a.x_axis.unit)?' ('+a.x_axis.unit+')':'');
+  if ((a.y_axis||{}).name) $('fy').value = a.y_axis.name +
+    ((a.y_axis.unit)?' ('+a.y_axis.unit+')':'');
+  cur.state.axis_config = cur.state.axis_config||{};
+  cur.state.axis_config.xIsLogScale = !!(a.x_axis||{}).is_log;
+  cur.state.axis_config.yIsLogScale = !!(a.y_axis||{}).is_log;
+  $('logx').checked = !!(a.x_axis||{}).is_log;
+  $('logy').checked = !!(a.y_axis||{}).is_log;
+});}
+function doVerify(){ assist('verify', {series_px: cur.state.series_px}, d=>{
+  if (d.series_px && d.series_px.length) cur.state.series_px = d.series_px;
+});}
 document.querySelectorAll('input[name=mode]').forEach(el=>
   el.onchange = () => { mode = el.value; });
-window.addEventListener('load', ()=>{ bindCanvas(); load(); });
+window.addEventListener('load', ()=>{
+  bindCanvas();
+  $('cv').addEventListener('wheel', e=>{
+    e.preventDefault();
+    const cvv=$('cv');
+    cvv._zoom = Math.min(4, Math.max(0.5, (cvv._zoom||1) * (e.deltaY<0?1.15:0.87)));
+    drawFig();
+  }, {passive:false});
+  load();
+});
 """
 
 
@@ -903,9 +952,17 @@ def review_session_page(sid: int):
   <label class="ck"><input type="radio" name="mode" value="drag" checked>drag</label>
   <label class="ck"><input type="radio" name="mode" value="add">add point</label>
   <label class="ck"><input type="radio" name="mode" value="del">delete point</label>
-  <span class="muted small">— selected curve gets adds; radio picks the curve</span>
+  <span class="muted small">— selected curve gets adds; radio picks the curve; wheel zooms</span>
 </div>
-<canvas id="cv" class="plot"></canvas>
+<div class="toolbar" style="margin:4px 0 8px">
+  <button class="pairbtn" onclick="doAxes()">Detect axes</button>
+  <button class="pairbtn" onclick="doAiAxes()">✦ AI axis names</button>
+  <button class="pairbtn" onclick="doScatter()">Detect scatter</button>
+  <button class="pairbtn" onclick="doLabel()">✦ Label lines</button>
+  <button class="pairbtn" onclick="doVerify()">✦ Verify curves</button>
+  <span class="muted small" id="amsg"></span>
+</div>
+<div style="overflow:auto;max-height:640px"><canvas id="cv" class="plot"></canvas></div>
 <div style="display:flex;gap:14px;flex-wrap:wrap;margin-top:8px">
   <div style="min-width:260px"><h2>Curves</h2><div id="series"></div></div>
   <div><h2>Axes</h2>
