@@ -86,6 +86,7 @@ def layout(title, active, body, extra_js=""):
                                   ("materials", "/materials", "Materials"),
                                   ("find", "/find", "Find"),
                                   ("queue", "/queue", "Queue"),
+                                  ("review", "/review", "Review"),
                                   ("upload", "/upload", "Upload"),
                                   ("api", "/docs", "API")])
     return HTMLResponse(f"""<!doctype html><html lang="en"><head><meta charset="utf-8">
@@ -742,6 +743,202 @@ when its record is uploaded.</p>
     return layout("Queue", "queue", body, QUEUE_JS)
 
 
+REVIEW_LIST_JS = """
+async function load(){
+  const d = await (await fetch('/ui/review/sessions')).json();
+  const chip = s => ({ready:'#e3ecff', in_review:'#fdf3e3', approved:'#e3f3ea'}[s]||'#eef2f7');
+  document.getElementById('rbody').innerHTML = d.sessions.map(s=>`<tr>
+    <td><span class="chip" style="background:${chip(s.status)}">${s.status}</span></td>
+    <td><a href="/review/${s.id}"><b>${s.title||s.pdf}</b></a>
+        <div class="muted small">${s.doi||''} · ${s.n_figures} figure(s), ${s.n_reviewed} reviewed · ${s.created_at}</div></td>
+  </tr>`).join('') || '<tr><td colspan="2" class="muted">No batch sessions yet — run batch_run.py --push.</td></tr>';
+}
+load(); setInterval(load, 5000);
+"""
+
+
+def review_list_page():
+    body = """
+<div class="card"><h1>Batch review</h1>
+<p class="muted" style="margin-top:0">Papers extracted on the GPU land here as the batch runs.
+Open one to correct figures and edit its KMDS record, then approve to ingest.</p>
+<div style="overflow-x:auto"><table><tbody id="rbody"></tbody></table></div></div>"""
+    return layout("Review", "review", body, REVIEW_LIST_JS)
+
+
+REVIEW_SESSION_JS = r"""
+const SID = window.__SID; let S=null, cur=null, sel=0, mode='drag', drag=null;
+const $ = id => document.getElementById(id);
+const COL = __PALETTE__;
+async function api(url, method, body){
+  const r = await fetch(url, {method, headers:{'Content-Type':'application/json',
+    'X-API-Key': $('rkey').value.trim()}, body: body?JSON.stringify(body):undefined});
+  return {ok:r.ok, data: await r.json().catch(()=>({}))};
+}
+async function load(){
+  S = await (await fetch('/ui/review/session/'+SID)).json();
+  $('rtitle').textContent = S.title || S.pdf;
+  $('rmeta').textContent = (S.doi||'') + ' · ' + S.status;
+  $('figs').innerHTML = S.figures.map((f,i)=>
+    `<button class="pairbtn ${i===0?'on':''}" data-i="${i}" onclick="pick(${i})">${f.label||('fig '+(f.idx+1))}
+     <span class="n">${f.status}</span></button>`).join('');
+  $('krec').value = JSON.stringify(S.record, null, 1);
+  if (S.figures.length) pick(0);
+}
+function pick(i){
+  document.querySelectorAll('#figs .pairbtn').forEach(b=>b.classList.toggle('on',+b.dataset.i===i));
+  cur = S.figures[i]; sel = 0;
+  const img = new Image();
+  img.onload = () => { cur._img = img; drawFig(); };
+  img.src = '/ui/review/figure/'+cur.fid+'.png';
+  const st = cur.state;
+  $('fx').value = st.x_name||''; $('fy').value = st.y_name||'';
+  const c = st.axis_config||{};
+  for (const k of ['x1_val','x2_val','y1_val','y2_val'])
+    $(k).value = (c[k]===undefined||c[k]===null)?'':c[k];
+  $('logx').checked = !!c.xIsLogScale; $('logy').checked = !!c.yIsLogScale;
+  seriesList();
+}
+function seriesList(){
+  const st = cur.state;
+  $('series').innerHTML = (st.series_px||[]).map((s,i)=>
+    `<div style="display:flex;gap:6px;align-items:center;margin:2px 0">
+      <i style="width:12px;height:12px;border-radius:3px;background:${COL[i%COL.length]};display:inline-block"></i>
+      <input class="search" style="flex:1" value="${(st.series_names||[])[i]||('Line '+(i+1))}"
+        onchange="S && (cur.state.series_names[${i}]=this.value)">
+      <input type="radio" name="selser" ${i===sel?'checked':''} onclick="sel=${i}">
+      <button class="pairbtn" onclick="delSeries(${i})">✕</button></div>`).join('');
+}
+function delSeries(i){
+  cur.state.series_px.splice(i,1);
+  (cur.state.series_names||[]).splice(i,1);
+  sel = 0; seriesList(); drawFig();
+}
+function drawFig(){
+  if(!cur || !cur._img) return;
+  const cv = $('cv'), img = cur._img;
+  const scale = Math.min(1, 860/img.width);
+  cv.width = img.width*scale; cv.height = img.height*scale;
+  cv._scale = scale;
+  const g = cv.getContext('2d');
+  g.drawImage(img, 0, 0, cv.width, cv.height);
+  (cur.state.series_px||[]).forEach((s,i)=>{
+    g.fillStyle = COL[i%COL.length];
+    s.forEach(p=>{ g.beginPath(); g.arc(p[0]*scale, p[1]*scale, i===sel?3.2:2.2, 0, 7); g.fill(); });
+  });
+}
+function nearest(x, y){
+  let best=null, bd=14;
+  (cur.state.series_px||[]).forEach((s,i)=>s.forEach((p,j)=>{
+    const d = Math.hypot(p[0]-x, p[1]-y);
+    if (d<bd){bd=d; best=[i,j];}
+  }));
+  return best;
+}
+function canvasXY(e){
+  const cv=$('cv'), r=cv.getBoundingClientRect();
+  return [(e.clientX-r.left)/cv._scale, (e.clientY-r.top)/cv._scale];
+}
+function bindCanvas(){
+  const cv=$('cv');
+  cv.onmousedown = e => {
+    const [x,y]=canvasXY(e);
+    if (mode==='add'){ cur.state.series_px[sel].push([x,y]);
+      cur.state.series_px[sel].sort((a,b)=>a[0]-b[0]); drawFig(); return; }
+    const n = nearest(x,y);
+    if (!n) return;
+    if (mode==='del'){ cur.state.series_px[n[0]].splice(n[1],1); drawFig(); return; }
+    drag = n;
+  };
+  cv.onmousemove = e => { if(!drag) return;
+    const [x,y]=canvasXY(e); cur.state.series_px[drag[0]][drag[1]]=[x,y]; drawFig(); };
+  cv.onmouseup = () => { drag=null; };
+}
+function collectState(){
+  const st = cur.state;
+  st.x_name = $('fx').value.trim(); st.y_name = $('fy').value.trim();
+  st.axis_config = st.axis_config || {};
+  for (const k of ['x1_val','x2_val','y1_val','y2_val'])
+    if ($(k).value.trim()!=='') st.axis_config[k]=parseFloat($(k).value);
+  st.axis_config.xIsLogScale = $('logx').checked;
+  st.axis_config.yIsLogScale = $('logy').checked;
+  st.n_lines = (st.series_px||[]).length;
+  st.n_points = (st.series_px||[]).reduce((a,s)=>a+s.length,0);
+  return st;
+}
+async function saveFig(status){
+  const body = {state: collectState()};
+  if (status) body.status = status;
+  const r = await api('/api/v1/review/figure/'+cur.fid, 'PATCH', body);
+  $('fmsg').textContent = r.ok ? ('saved'+(status?' · '+status:'')) : ('failed: '+JSON.stringify(r.data.detail||r.data));
+  if (r.ok && status){ cur.status = status; load(); }
+}
+async function saveRecord(){
+  let rec;
+  try { rec = JSON.parse($('krec').value); }
+  catch(e){ $('kmsg').textContent = 'JSON error: '+e.message; return; }
+  const r = await api('/api/v1/review/session/'+SID, 'PATCH', {record: rec});
+  $('kmsg').textContent = r.ok ? (r.data.n_violations+' schema violation(s)') : 'save failed';
+}
+async function approveAll(){
+  const r = await api('/api/v1/review/session/'+SID+'/approve', 'POST');
+  $('kmsg').innerHTML = r.ok
+    ? ('✅ ingested as <a href="/view/'+r.data.sid+'"><b>SID-'+r.data.sid+'</b></a>')
+    : ('approve failed: '+JSON.stringify(r.data.detail||r.data));
+}
+document.querySelectorAll('input[name=mode]').forEach(el=>
+  el.onchange = () => { mode = el.value; });
+window.addEventListener('load', ()=>{ bindCanvas(); load(); });
+"""
+
+
+def review_session_page(sid: int):
+    body = """
+<div class="card"><div class="muted small" id="rmeta"></div><h1 id="rtitle">…</h1>
+<a href="/review">&larr; all sessions</a> &nbsp;·&nbsp;
+<input class="search" id="rkey" type="password" placeholder="API key (sd3_…)" style="max-width:240px">
+</div>
+<div class="card"><h2>Figures</h2><div id="figs"></div>
+<div class="toolbar" style="margin:8px 0">
+  <label class="ck"><input type="radio" name="mode" value="drag" checked>drag</label>
+  <label class="ck"><input type="radio" name="mode" value="add">add point</label>
+  <label class="ck"><input type="radio" name="mode" value="del">delete point</label>
+  <span class="muted small">— selected curve gets adds; radio picks the curve</span>
+</div>
+<canvas id="cv" class="plot"></canvas>
+<div style="display:flex;gap:14px;flex-wrap:wrap;margin-top:8px">
+  <div style="min-width:260px"><h2>Curves</h2><div id="series"></div></div>
+  <div><h2>Axes</h2>
+    <div style="display:flex;gap:6px;flex-wrap:wrap;max-width:340px">
+      <input class="search" id="fx" placeholder="x property" style="width:160px">
+      <input class="search" id="fy" placeholder="y property" style="width:160px">
+      <input class="search" id="x1_val" placeholder="x min" style="width:76px">
+      <input class="search" id="x2_val" placeholder="x max" style="width:76px">
+      <input class="search" id="y1_val" placeholder="y min" style="width:76px">
+      <input class="search" id="y2_val" placeholder="y max" style="width:76px">
+      <label class="ck"><input type="checkbox" id="logx">log x</label>
+      <label class="ck"><input type="checkbox" id="logy">log y</label>
+    </div>
+    <div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap">
+      <button class="pairbtn on" onclick="saveFig()">Save figure</button>
+      <button class="pairbtn" onclick="saveFig('approved')">Approve ✓</button>
+      <button class="pairbtn" onclick="saveFig('rejected')">Reject ✕</button>
+      <span class="muted small" id="fmsg"></span>
+    </div>
+  </div>
+</div></div>
+<div class="card"><h2>KMDS record (editable)</h2>
+<textarea id="krec" class="search" style="width:100%;height:300px;font-family:monospace;font-size:12px"></textarea>
+<div style="margin-top:8px;display:flex;gap:8px;align-items:center">
+  <button class="pairbtn on" onclick="saveRecord()">Validate &amp; save</button>
+  <button class="pairbtn" onclick="approveAll()" style="color:#178a50"><b>Approve session → database</b></button>
+  <span class="muted small" id="kmsg"></span>
+</div></div>
+<script>window.__SID = %d;</script>""" % sid
+    return layout(f"Review #{sid}", "review", body,
+                  REVIEW_SESSION_JS.replace("__PALETTE__", json.dumps(PALETTE)))
+
+
 def register_ui(app, engine, Record, GraphCurve, select, Session):
     @app.get("/", response_class=HTMLResponse)
     def _home():
@@ -766,6 +963,14 @@ def register_ui(app, engine, Record, GraphCurve, select, Session):
     @app.get("/queue", response_class=HTMLResponse)
     def _queue():
         return queue_page()
+
+    @app.get("/review", response_class=HTMLResponse)
+    def _review():
+        return review_list_page()
+
+    @app.get("/review/{sid}", response_class=HTMLResponse)
+    def _review_session(sid: int):
+        return review_session_page(sid)
 
     @app.get("/material/{key}", response_class=HTMLResponse)
     def _material(key: str):

@@ -200,6 +200,34 @@ class Paper(SQLModel, table=True):
     added_at: str = Field(default_factory=_now)
 
 
+class ReviewSession(SQLModel, table=True):
+    """One batch-extracted paper awaiting curator review on the web portal.
+    The GPU batch runner pushes these; approving one ingests the (possibly
+    curator-edited) record + figures into the real database."""
+    id: Optional[int] = Field(default=None, primary_key=True)
+    pdf_name: str = ""
+    doi: str = Field(default="", index=True)
+    title: str = ""
+    status: str = "ready"           # ready | in_review | approved
+    record_json: str = "{}"         # KMDS record (curator-editable)
+    n_figures: int = 0
+    created_at: str = Field(default_factory=_now)
+    updated_at: str = Field(default_factory=_now)
+
+
+class ReviewFigure(SQLModel, table=True):
+    """One digitized figure inside a review session: the crop image plus
+    the editable digitization state (pixel-space curves, axis config)."""
+    id: Optional[int] = Field(default=None, primary_key=True)
+    session_id: int = Field(index=True)
+    idx: int = 0
+    label: str = ""
+    page: Optional[int] = None
+    image_png: bytes = b""
+    state_json: str = "{}"          # series_px/series_names/axis_config/...
+    status: str = "pending"         # pending | edited | approved | rejected
+
+
 class QualityFlag(SQLModel, table=True):
     """Result of a cross-property consistency check on one sample's curves
     (checks.py). Recomputed on every ingest of the record."""
@@ -1180,6 +1208,257 @@ def ui_facet(prop: str, vmin: Optional[float] = None, vmax: Optional[float] = No
                      "n_matching_points": len(matching)})
     hits.sort(key=lambda h: -h["best_value"])
     return {"prop": prop, "prop_x": prop_x, "count": len(hits), "hits": hits}
+
+
+# ---------------------------------------------------------------------------
+# Review portal: batch-extracted papers land here for curator review;
+# approval ingests them into the real database.
+# ---------------------------------------------------------------------------
+
+@app.post("/api/v1/review/sessions")
+def push_review_session(body: Dict[str, Any] = Body(...),
+                        key: APIKey = Depends(require_scope("write"))):
+    """Batch runner drop-off: KMDS record + digitized figures for one paper.
+    Replaces an existing session with the same pdf_name (re-runs stay clean)."""
+    import base64
+    pdf_name = (body.get("pdf") or "").strip()
+    if not pdf_name:
+        raise HTTPException(400, "session needs a pdf name")
+    record = body.get("record") or {}
+    pub = (record.get("metadata") or {}).get("publication") or {}
+    with Session(engine) as s:
+        old = s.exec(select(ReviewSession)
+                     .where(ReviewSession.pdf_name == pdf_name)).first()
+        if old:
+            for f in s.exec(select(ReviewFigure)
+                            .where(ReviewFigure.session_id == old.id)).all():
+                s.delete(f)
+            s.delete(old)
+            s.commit()
+        figures = body.get("figures") or []
+        sess = ReviewSession(
+            pdf_name=pdf_name,
+            doi=(body.get("doi") or pub.get("DOI") or "").strip(),
+            title=(pub.get("title") or body.get("title") or "")[:500],
+            record_json=json.dumps(record, ensure_ascii=False),
+            n_figures=len(figures))
+        s.add(sess); s.commit(); s.refresh(sess)
+        for f in figures:
+            png = b""
+            if f.get("png_b64"):
+                try:
+                    png = base64.b64decode(f["png_b64"])
+                except Exception:
+                    png = b""
+            if len(png) > _MAX_PROV_IMAGE:
+                png = b""
+            s.add(ReviewFigure(
+                session_id=sess.id, idx=int(f.get("idx") or 0),
+                label=(f.get("label") or "")[:300], page=f.get("page"),
+                image_png=png,
+                state_json=json.dumps(f.get("state") or {},
+                                      ensure_ascii=False)))
+        s.commit()
+        return {"ok": True, "session_id": sess.id, "figures": len(figures)}
+
+
+@app.get("/ui/review/sessions")
+def ui_review_sessions():
+    with Session(engine) as s:
+        rows = s.exec(select(ReviewSession)).all()
+        figs = s.exec(select(ReviewFigure)).all()
+    by_sess: Dict[int, List[ReviewFigure]] = {}
+    for f in figs:
+        by_sess.setdefault(f.session_id, []).append(f)
+    out = []
+    for r in sorted(rows, key=lambda x: x.created_at, reverse=True):
+        ff = by_sess.get(r.id, [])
+        out.append({"id": r.id, "pdf": r.pdf_name, "doi": r.doi,
+                    "title": r.title, "status": r.status,
+                    "n_figures": len(ff),
+                    "n_reviewed": sum(1 for x in ff
+                                      if x.status in ("approved", "rejected",
+                                                      "edited")),
+                    "created_at": r.created_at[:16]})
+    return {"count": len(out), "sessions": out}
+
+
+@app.get("/ui/review/session/{sid}")
+def ui_review_session(sid: int):
+    with Session(engine) as s:
+        r = s.get(ReviewSession, sid)
+        if r is None:
+            raise HTTPException(404, "no such session")
+        figs = s.exec(select(ReviewFigure)
+                      .where(ReviewFigure.session_id == sid)).all()
+    return {"id": r.id, "pdf": r.pdf_name, "doi": r.doi, "title": r.title,
+            "status": r.status, "record": json.loads(r.record_json or "{}"),
+            "figures": [{"fid": f.id, "idx": f.idx, "label": f.label,
+                         "page": f.page, "status": f.status,
+                         "state": json.loads(f.state_json or "{}"),
+                         "has_image": bool(f.image_png)}
+                        for f in sorted(figs, key=lambda x: x.idx)]}
+
+
+@app.get("/ui/review/figure/{fid}.png")
+def ui_review_figure_png(fid: int):
+    from fastapi.responses import Response
+    with Session(engine) as s:
+        f = s.get(ReviewFigure, fid)
+    if f is None or not f.image_png:
+        raise HTTPException(404, "no image")
+    return Response(content=f.image_png, media_type="image/png",
+                    headers={"Cache-Control": "max-age=86400"})
+
+
+@app.patch("/api/v1/review/figure/{fid}")
+def patch_review_figure(fid: int, body: Dict[str, Any] = Body(...),
+                        key: APIKey = Depends(require_scope("write"))):
+    """Curator saves an edited figure state and/or flips its status."""
+    with Session(engine) as s:
+        f = s.get(ReviewFigure, fid)
+        if f is None:
+            raise HTTPException(404, "no such figure")
+        if "state" in body and isinstance(body["state"], dict):
+            f.state_json = json.dumps(body["state"], ensure_ascii=False)
+            if f.status == "pending":
+                f.status = "edited"
+        if body.get("status") in ("pending", "edited", "approved", "rejected"):
+            f.status = body["status"]
+        s.add(f)
+        sess = s.get(ReviewSession, f.session_id)
+        if sess and sess.status == "ready":
+            sess.status = "in_review"
+            sess.updated_at = _now()
+            s.add(sess)
+        s.commit()
+        return {"ok": True, "fid": fid, "status": f.status}
+
+
+@app.patch("/api/v1/review/session/{sid}")
+def patch_review_session(sid: int, body: Dict[str, Any] = Body(...),
+                         key: APIKey = Depends(require_scope("write"))):
+    """Curator saves the edited KMDS record; response includes live schema
+    validation so the portal can show violations as they edit."""
+    with Session(engine) as s:
+        r = s.get(ReviewSession, sid)
+        if r is None:
+            raise HTTPException(404, "no such session")
+        if "record" in body and isinstance(body["record"], dict):
+            r.record_json = json.dumps(body["record"], ensure_ascii=False)
+            r.updated_at = _now()
+            if r.status == "ready":
+                r.status = "in_review"
+            s.add(r); s.commit()
+        viol = validate_kmds(json.loads(r.record_json))
+    return {"ok": True, "n_violations": len(viol), "violations": viol[:20]}
+
+
+@app.post("/api/v1/review/session/{sid}/approve")
+def approve_review_session(sid: int, key: APIKey = Depends(require_scope("write"))):
+    """Graft every non-rejected figure's (curator-edited) curves into the
+    KMDS record, ingest it into the real database, and attach provenance
+    (crop + calibration) — the batch papers' final step."""
+    import base64
+    with Session(engine) as s:
+        r = s.get(ReviewSession, sid)
+        if r is None:
+            raise HTTPException(404, "no such session")
+        figs = s.exec(select(ReviewFigure)
+                      .where(ReviewFigure.session_id == sid)).all()
+    record = json.loads(r.record_json or "{}")
+    pub = record.setdefault("metadata", {}).setdefault("publication", {})
+    figures = pub.setdefault("figures", [])
+    used = [f for f in sorted(figs, key=lambda x: x.idx)
+            if f.status != "rejected"]
+    for f in used:
+        st = json.loads(f.state_json or "{}")
+        cfg = st.get("axis_config") or {}
+        series_px = st.get("series_px") or []
+        names = st.get("series_names") or []
+        pts = []
+        for i, sp in enumerate(series_px):
+            data = [_px_to_data(cfg, p[0], p[1]) for p in sp if len(p) >= 2]
+            data = [d for d in data if d is not None]
+            if data:
+                pts.append({"label": (names[i] if i < len(names) else None)
+                            or f"Line {i + 1}", "points_data": data})
+        if not pts:
+            continue
+        figures.append({
+            "figure local id": f"f-b{f.idx + 1:02d}",
+            "figure name": f.label or f"Figure {f.idx + 1}",
+            "graphs": [{
+                "graph local id": f"g-b{f.idx + 1:02d}",
+                "axes": [
+                    {"axis": "x", "quantity": {"term": st.get("x_name") or "X"},
+                     "unit": st.get("x_unit") or ""},
+                    {"axis": "y", "quantity": {"term": st.get("y_name") or "Y"},
+                     "unit": st.get("y_unit") or ""},
+                ],
+                "digitization_data": {
+                    "x_axis": {"name": st.get("x_name") or "",
+                               "is_log": bool(cfg.get("xIsLogScale"))},
+                    "y_axis": {"name": st.get("y_name") or "",
+                               "is_log": bool(cfg.get("yIsLogScale"))},
+                    "series": pts,
+                    "provenance": {"page": f.page, "batch": True,
+                                   "reviewed": f.status},
+                },
+            }],
+        })
+    result = store_record(record)
+    sid_new = result.get("sid")
+    doi = result.get("doi") or ""
+    with Session(engine) as s:
+        for f in used:
+            if not f.image_png:
+                continue
+            st = json.loads(f.state_json or "{}")
+            for old in s.exec(select(Provenance).where(
+                    Provenance.record_sid == sid_new,
+                    Provenance.label == (f.label or f"Figure {f.idx + 1}"))).all():
+                s.delete(old)
+            s.add(Provenance(
+                record_sid=sid_new, doi=doi,
+                label=f.label or f"Figure {f.idx + 1}", page=f.page,
+                image_png=f.image_png,
+                calibration_json=json.dumps(st.get("axis_config") or {}),
+                extractor_json=json.dumps({"app": "batch_run + review portal"}),
+                curator="portal"))
+        r2 = s.get(ReviewSession, sid)
+        r2.status = "approved"
+        r2.updated_at = _now()
+        s.add(r2)
+        s.commit()
+    return {"ok": True, "sid": sid_new, "figures_ingested": len(used),
+            "consistency_flags": result.get("consistency_flags")}
+
+
+def _px_to_data(cfg: Dict[str, Any], px: float, py: float):
+    """Pixel -> data using the app's axis_config convention (two reference
+    points per axis, optional log scale)."""
+    import math
+    try:
+        x1p, x2p = float(cfg["x1_px"]), float(cfg["x2_px"])
+        y1p, y2p = float(cfg["y1_py"]), float(cfg["y2_py"])
+        x1v, x2v = float(cfg["x1_val"]), float(cfg["x2_val"])
+        y1v, y2v = float(cfg["y1_val"]), float(cfg["y2_val"])
+        if x2p == x1p or y2p == y1p:
+            return None
+        fx = (float(px) - x1p) / (x2p - x1p)
+        fy = (float(py) - y1p) / (y2p - y1p)
+        if cfg.get("xIsLogScale") and x1v > 0 and x2v > 0:
+            x = 10 ** (math.log10(x1v) + fx * (math.log10(x2v) - math.log10(x1v)))
+        else:
+            x = x1v + fx * (x2v - x1v)
+        if cfg.get("yIsLogScale") and y1v > 0 and y2v > 0:
+            y = 10 ** (math.log10(y1v) + fy * (math.log10(y2v) - math.log10(y1v)))
+        else:
+            y = y1v + fy * (y2v - y1v)
+        return [x, y]
+    except (KeyError, TypeError, ValueError):
+        return None
 
 
 _MAX_PROV_IMAGE = 4 * 1024 * 1024   # 4 MB decoded — figure crops are ~100 KB

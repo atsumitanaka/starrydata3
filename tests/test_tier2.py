@@ -173,3 +173,63 @@ def test_release_bundle(tmp_path):
         assert "comp_key" in header and "x" in header and "y" in header
     finally:
         shutil.rmtree(root, ignore_errors=True)
+
+
+def test_review_portal_roundtrip(client, wkey):
+    import base64
+    png = base64.b64encode(base64.b64decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNgYGBgAAAABQAB"
+        "h6FO1AAAAABJRU5ErkJggg==")).decode()
+    state = {"series_px": [[[10, 10], [20, 20]]], "series_names": ["A"],
+             "x_name": "temperature", "y_name": "ZT",
+             "axis_config": {"x1_px": 0, "x2_px": 100, "y1_py": 100,
+                             "y2_py": 0, "x1_val": 300, "x2_val": 800,
+                             "y1_val": 0, "y2_val": 2,
+                             "xIsLogScale": False, "yIsLogScale": False},
+             "calibrated": True}
+    body = {"pdf": "t2paper.pdf",
+            "record": {"metadata": {"publication": {
+                "DOI": "10.9999/t2.review", "title": "Review portal test"}}},
+            "figures": [{"idx": 0, "label": "Fig 1", "page": 2,
+                         "png_b64": png, "state": state}]}
+    r = client.post("/api/v1/review/sessions", json=body,
+                    headers={"X-API-Key": wkey})
+    assert r.status_code == 200
+    sid = r.json()["session_id"]
+
+    lst = client.get("/ui/review/sessions").json()
+    assert any(s["id"] == sid for s in lst["sessions"])
+    full = client.get(f"/ui/review/session/{sid}").json()
+    fid = full["figures"][0]["fid"]
+    assert full["figures"][0]["state"]["series_names"] == ["A"]
+    assert client.get(f"/ui/review/figure/{fid}.png").status_code == 200
+
+    # curator edits a point and approves the figure
+    state["series_px"][0][0] = [12, 11]
+    r2 = client.patch(f"/api/v1/review/figure/{fid}",
+                      json={"state": state, "status": "approved"},
+                      headers={"X-API-Key": wkey})
+    assert r2.json()["status"] == "approved"
+
+    # record edit returns live validation
+    r3 = client.patch(f"/api/v1/review/session/{sid}",
+                      json={"record": body["record"]},
+                      headers={"X-API-Key": wkey})
+    assert r3.status_code == 200 and "n_violations" in r3.json()
+
+    # approve -> ingested with grafted digitization + provenance
+    r4 = client.post(f"/api/v1/review/session/{sid}/approve",
+                     headers={"X-API-Key": wkey})
+    assert r4.status_code == 200
+    new_sid = r4.json()["sid"]
+    assert r4.json()["figures_ingested"] == 1
+    page = client.get(f"/view/{new_sid}")
+    assert page.status_code == 200
+    prov = client.get(f"/ui/provenance/{new_sid}").json()["entries"]
+    assert prov and prov[0]["label"] == "Fig 1"
+    # pixel->data grafting produced calibrated points
+    rec = client.get(f"/ui/record/{new_sid}").json()
+    dd = rec["metadata"]["publication"]["figures"][-1]["graphs"][0]["digitization_data"]
+    assert dd["series"][0]["points_data"]
+    x0, y0 = dd["series"][0]["points_data"][0]
+    assert 300 <= x0 <= 800 and 0 <= y0 <= 2
