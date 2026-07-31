@@ -929,6 +929,9 @@ function doVerify(){ assist('verify', {series_px: cur.state.series_px}, d=>{
 document.querySelectorAll('input[name=mode]').forEach(el=>
   el.onchange = () => { mode = el.value; });
 window.addEventListener('load', ()=>{
+  $('rkey').value = localStorage.getItem('sd3key') || '';
+  $('rkey').addEventListener('input',
+    ()=>localStorage.setItem('sd3key', $('rkey').value.trim()));
   bindCanvas();
   $('cv').addEventListener('wheel', e=>{
     e.preventDefault();
