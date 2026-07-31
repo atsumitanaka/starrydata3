@@ -934,7 +934,8 @@ def review_session_page(sid: int):
   <button class="pairbtn" onclick="approveAll()" style="color:#178a50"><b>Approve session → database</b></button>
   <span class="muted small" id="kmsg"></span>
 </div></div>
-<script>window.__SID = %d;</script>""" % sid
+<script>window.__SID = __SID_VALUE__;</script>"""
+    body = body.replace("__SID_VALUE__", str(int(sid)))
     return layout(f"Review #{sid}", "review", body,
                   REVIEW_SESSION_JS.replace("__PALETTE__", json.dumps(PALETTE)))
 
