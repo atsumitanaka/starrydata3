@@ -1052,6 +1052,7 @@ def review_session_page(sid: int):
   <label class="ck"><input type="radio" name="mode" value="add">add point</label>
   <label class="ck"><input type="radio" name="mode" value="del">delete point</label>
   <button class="pairbtn" onclick="undo()">↩ Undo</button>
+  <button class="pairbtn" onclick="window.open('/digitizer/?figure='+cur.fid,'_blank')">⭐ Open in StarryDigitizer</button>
   <span class="muted small">— click a curve to select it · add inserts into the line · drag a box in delete mode to erase a region · keys: 1/2/3 modes, M magnifier, ⌘Z undo · wheel zooms</span>
 </div>
 <div class="toolbar" style="margin:4px 0 8px">

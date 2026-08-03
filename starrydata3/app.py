@@ -587,6 +587,13 @@ app = FastAPI(title="Starrydata3", version="0.0.1",
               description="Private, KMDS-based materials-data service with API-key writes.")
 
 
+from fastapi.staticfiles import StaticFiles as _StaticFiles
+_dig = os.path.join(os.path.dirname(os.path.abspath(__file__)), "digitizer")
+if os.path.isdir(_dig):
+    app.mount("/digitizer", _StaticFiles(directory=_dig, html=True),
+              name="digitizer")
+
+
 def init_db():
     SQLModel.metadata.create_all(engine)
     # additive migrations for columns create_all won't add to existing tables
