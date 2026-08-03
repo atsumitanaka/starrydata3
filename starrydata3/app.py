@@ -1341,6 +1341,16 @@ def ui_review_session(sid: int):
                         for f in sorted(figs, key=lambda x: x.idx)]}
 
 
+@app.get("/ui/review/figure/{fid}/state")
+def ui_review_figure_state(fid: int):
+    """Digitization state for the embedded StarryDigitizer bridge."""
+    with Session(engine) as s:
+        f = s.get(ReviewFigure, fid)
+    if f is None:
+        raise HTTPException(404, "no such figure")
+    return json.loads(f.state_json or "{}")
+
+
 @app.get("/ui/review/figure/{fid}.png")
 def ui_review_figure_png(fid: int):
     from fastapi.responses import Response

@@ -15,8 +15,8 @@
         gtag('config', 'G-9QDX98GT94');
       }
     </script>
-    <script type="module" crossorigin src="/digitizer/assets/index-c6917564.js"></script>
-    <link rel="stylesheet" href="/digitizer/assets/index-dcb4b441.css">
+    <script type="module" crossorigin src="/digitizer/assets/index-f55c99eb.js"></script>
+    <link rel="stylesheet" href="/digitizer/assets/index-684fadc5.css">
   </head>
   <body>
     <div id="app"></div>
@@ -24,26 +24,32 @@
   </body>
 </html>
 <script>
-// Portal bridge v1: ?figure=<fid> auto-loads that review figure into the
-// digitizer's own image input (synthetic file selection).
+// Portal bridge: ?figure=<fid> -> auto-load the crop AND the batch
+// digitization state (curves + axis calibration) into StarryDigitizer.
 (async () => {
   const fid = new URLSearchParams(location.search).get('figure');
   if (!fid) return;
   try {
     const blob = await (await fetch('/ui/review/figure/' + fid + '.png')).blob();
     const file = new File([blob], 'figure-' + fid + '.png', {type: 'image/png'});
-    const tryInject = () => {
+    const inject = () => {
       const all = [...document.querySelectorAll('input[type=file]')];
       const inp = all.find(i => (i.accept||'').includes('image'))
                || all.find(i => !(i.accept||'').includes('zip'))
                || all[1] || all[0];
-      if (!inp) return setTimeout(tryInject, 300);
+      if (!inp) return setTimeout(inject, 300);
       const dt = new DataTransfer();
       dt.items.add(file);
       inp.files = dt.files;
       inp.dispatchEvent(new Event('change', {bubbles: true}));
+      loadState();
     };
-    tryInject();
+    const loadState = async () => {
+      if (!window.__SD_BRIDGE) return setTimeout(loadState, 300);
+      const state = await (await fetch('/ui/review/figure/' + fid + '/state')).json();
+      setTimeout(() => window.__SD_BRIDGE.loadState(state), 800);
+    };
+    inject();
   } catch (e) { console.warn('portal bridge:', e); }
 })();
 </script>

@@ -1053,6 +1053,7 @@ def review_session_page(sid: int):
   <label class="ck"><input type="radio" name="mode" value="del">delete point</label>
   <button class="pairbtn" onclick="undo()">↩ Undo</button>
   <button class="pairbtn" onclick="const f=document.getElementById('sdframe'); f.style.display=(f.style.display==='none'?'block':'none'); if(f.style.display==='block') f.src='/digitizer/index.html?figure='+cur.fid;">⭐ StarryDigitizer</button>
+  <button class="pairbtn" onclick="const b=document.getElementById('sdframe').contentWindow.__SD_BRIDGE; if(!b){$('fmsg').textContent='digitizer not open';return;} snapshot(); const st=b.exportState(); cur.state.series_px=st.series_px; cur.state.series_names=st.series_names; drawFig(); seriesList(); $('fmsg').textContent='pulled '+st.series_px.length+' curve(s) from StarryDigitizer — Save figure to keep';">⬇ Pull edits back</button>
   <span class="muted small">— click a curve to select it · add inserts into the line · drag a box in delete mode to erase a region · keys: 1/2/3 modes, M magnifier, ⌘Z undo · wheel zooms</span>
 </div>
 <div class="toolbar" style="margin:4px 0 8px">
