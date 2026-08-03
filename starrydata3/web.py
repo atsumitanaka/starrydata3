@@ -823,17 +823,79 @@ function drawFig(){
   const g = cv.getContext('2d');
   g.drawImage(img, 0, 0, cv.width, cv.height);
   (cur.state.series_px||[]).forEach((s,i)=>{
+    const on = i===sel;
     g.fillStyle = COL[i%COL.length];
-    s.forEach(p=>{ g.beginPath(); g.arc(p[0]*scale, p[1]*scale, i===sel?3.2:2.2, 0, 7); g.fill(); });
+    g.globalAlpha = on ? 1 : 0.55;
+    s.forEach(p=>{ g.beginPath(); g.arc(p[0]*scale, p[1]*scale, on?3.6:2.2, 0, 7); g.fill(); });
+    if (on){                       // white halo marks the active curve
+      g.strokeStyle='#fff'; g.lineWidth=1;
+      s.forEach(p=>{ g.beginPath(); g.arc(p[0]*scale, p[1]*scale, 4.6, 0, 7); g.stroke(); });
+    }
   });
+  g.globalAlpha = 1;
+  if (box && box.active){          // erase rectangle
+    g.strokeStyle='#d6455d'; g.setLineDash([6,4]); g.lineWidth=1.5;
+    g.strokeRect(Math.min(box.x0,box.x1)*scale, Math.min(box.y0,box.y1)*scale,
+                 Math.abs(box.x1-box.x0)*scale, Math.abs(box.y1-box.y0)*scale);
+    g.setLineDash([]);
+  }
+  if (loupe && hover){             // magnifier inset (press M to toggle)
+    const L=170, Z=3.5, hx=hover[0], hy=hover[1];
+    const lx = (hx*scale < cv.width/2) ? cv.width-L-10 : 10;
+    g.save();
+    g.beginPath(); g.rect(lx, 10, L, L); g.clip();
+    g.fillStyle='#fff'; g.fillRect(lx,10,L,L);
+    g.drawImage(img, hx-L/(2*Z), hy-L/(2*Z), L/Z, L/Z, lx, 10, L, L);
+    (cur.state.series_px||[]).forEach((s,i)=>{
+      g.fillStyle = COL[i%COL.length];
+      s.forEach(p=>{
+        const px=lx+(p[0]-(hx-L/(2*Z)))*Z, py=10+(p[1]-(hy-L/(2*Z)))*Z;
+        if (px>=lx&&px<=lx+L&&py>=10&&py<=10+L){
+          g.beginPath(); g.arc(px, py, 3, 0, 7); g.fill(); } });
+    });
+    g.restore();
+    g.strokeStyle='#0d2544'; g.lineWidth=2; g.strokeRect(lx,10,L,L);
+    g.beginPath(); g.moveTo(lx+L/2-8,10+L/2); g.lineTo(lx+L/2+8,10+L/2);
+    g.moveTo(lx+L/2,10+L/2-8); g.lineTo(lx+L/2,10+L/2+8);
+    g.strokeStyle='#d6455d'; g.lineWidth=1; g.stroke();
+  }
 }
+let undoStack=[], box=null, hover=null, loupe=false;
+function snapshot(){
+  undoStack.push(JSON.stringify(cur.state.series_px));
+  if (undoStack.length>60) undoStack.shift();
+}
+function undo(){
+  if (!undoStack.length || !cur) return;
+  cur.state.series_px = JSON.parse(undoStack.pop());
+  drawFig(); seriesList();
+}
+function hitR(){ return 14 / ($('cv')._scale||1); }   // constant in screen px
 function nearest(x, y){
-  let best=null, bd=14;
+  let best=null, bd=hitR();
   (cur.state.series_px||[]).forEach((s,i)=>s.forEach((p,j)=>{
     const d = Math.hypot(p[0]-x, p[1]-y);
     if (d<bd){bd=d; best=[i,j];}
   }));
   return best;
+}
+function insertIntoSeries(s, x, y){
+  // insert at the nearest SEGMENT so loops/hysteresis keep their order
+  if (s.length < 2){ s.push([x,y]); return; }
+  let bi = 0, bd = Infinity;
+  for (let j=0; j<s.length-1; j++){
+    const [ax,ay]=s[j], [bx,by]=s[j+1];
+    const L2=(bx-ax)**2+(by-ay)**2 || 1;
+    let t=((x-ax)*(bx-ax)+(y-ay)*(by-ay))/L2;
+    t=Math.max(0,Math.min(1,t));
+    const d=Math.hypot(x-(ax+t*(bx-ax)), y-(ay+t*(by-ay)));
+    if (d<bd){bd=d; bi=j+1;}
+  }
+  const dEnd=Math.hypot(x-s[s.length-1][0], y-s[s.length-1][1]);
+  const dStart=Math.hypot(x-s[0][0], y-s[0][1]);
+  if (dEnd<bd) s.push([x,y]);
+  else if (dStart<bd) s.unshift([x,y]);
+  else s.splice(bi,0,[x,y]);
 }
 function canvasXY(e){
   const cv=$('cv'), r=cv.getBoundingClientRect();
@@ -842,17 +904,51 @@ function canvasXY(e){
 function bindCanvas(){
   const cv=$('cv');
   cv.onmousedown = e => {
+    if (!cur) return;
     const [x,y]=canvasXY(e);
-    if (mode==='add'){ cur.state.series_px[sel].push([x,y]);
-      cur.state.series_px[sel].sort((a,b)=>a[0]-b[0]); drawFig(); return; }
+    if (mode==='add'){ snapshot(); insertIntoSeries(cur.state.series_px[sel]||[], x, y); drawFig(); return; }
+    if (mode==='del'){ box={x0:x,y0:y,x1:x,y1:y,active:true}; return; }
     const n = nearest(x,y);
-    if (!n) return;
-    if (mode==='del'){ cur.state.series_px[n[0]].splice(n[1],1); drawFig(); return; }
-    drag = n;
+    if (n){ if (n[0]!==sel){ sel=n[0]; seriesList(); }   // click selects curve
+      snapshot(); drag = n; drawFig(); return; }
+    // clicked empty space: select nearest curve
+    let bi=null, bd=25/(cv._scale||1);
+    (cur.state.series_px||[]).forEach((s,i)=>s.forEach(p=>{
+      const d=Math.hypot(p[0]-x,p[1]-y); if(d<bd){bd=d;bi=i;} }));
+    if (bi!==null && bi!==sel){ sel=bi; seriesList(); drawFig(); }
   };
-  cv.onmousemove = e => { if(!drag) return;
-    const [x,y]=canvasXY(e); cur.state.series_px[drag[0]][drag[1]]=[x,y]; drawFig(); };
-  cv.onmouseup = () => { drag=null; };
+  cv.onmousemove = e => {
+    const [x,y]=canvasXY(e);
+    hover=[x,y];
+    if (box && box.active){ box.x1=x; box.y1=y; drawFig(); return; }
+    if (drag){ cur.state.series_px[drag[0]][drag[1]]=[x,y]; drawFig(); return; }
+    if (loupe) drawFig();
+  };
+  cv.onmouseup = e => {
+    if (box && box.active){
+      const [x0,x1]=[Math.min(box.x0,box.x1),Math.max(box.x0,box.x1)];
+      const [y0,y1]=[Math.min(box.y0,box.y1),Math.max(box.y0,box.y1)];
+      if (x1-x0>3 || y1-y0>3){
+        snapshot();
+        (cur.state.series_px||[]).forEach((s,i)=>{
+          cur.state.series_px[i]=s.filter(p=>!(p[0]>=x0&&p[0]<=x1&&p[1]>=y0&&p[1]<=y1)); });
+      } else {              // tiny box = a click: delete single point
+        const [x,y]=canvasXY(e); const n=nearest(x,y);
+        if (n){ snapshot(); cur.state.series_px[n[0]].splice(n[1],1); }
+      }
+      box=null; drawFig(); seriesList(); return;
+    }
+    drag=null;
+  };
+  cv.onmouseleave = () => { hover=null; if (loupe) drawFig(); };
+  document.addEventListener('keydown', e=>{
+    if ((e.metaKey||e.ctrlKey) && e.key==='z'){ e.preventDefault(); undo(); }
+    if (e.key==='m'){ loupe=!loupe; drawFig(); }
+    if (e.key==='1') mode='drag';
+    if (e.key==='2') mode='add';
+    if (e.key==='3') mode='del';
+    document.querySelectorAll('input[name=mode]').forEach(el=>el.checked = el.value===mode);
+  });
 }
 function collectState(){
   const st = cur.state;
@@ -955,7 +1051,8 @@ def review_session_page(sid: int):
   <label class="ck"><input type="radio" name="mode" value="drag" checked>drag</label>
   <label class="ck"><input type="radio" name="mode" value="add">add point</label>
   <label class="ck"><input type="radio" name="mode" value="del">delete point</label>
-  <span class="muted small">— selected curve gets adds; radio picks the curve; wheel zooms</span>
+  <button class="pairbtn" onclick="undo()">↩ Undo</button>
+  <span class="muted small">— click a curve to select it · add inserts into the line · drag a box in delete mode to erase a region · keys: 1/2/3 modes, M magnifier, ⌘Z undo · wheel zooms</span>
 </div>
 <div class="toolbar" style="margin:4px 0 8px">
   <button class="pairbtn" onclick="doAxes()">Detect axes</button>
