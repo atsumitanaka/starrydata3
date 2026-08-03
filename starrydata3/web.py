@@ -1052,7 +1052,7 @@ def review_session_page(sid: int):
   <label class="ck"><input type="radio" name="mode" value="add">add point</label>
   <label class="ck"><input type="radio" name="mode" value="del">delete point</label>
   <button class="pairbtn" onclick="undo()">↩ Undo</button>
-  <button class="pairbtn" onclick="window.open('/digitizer/?figure='+cur.fid,'_blank')">⭐ Open in StarryDigitizer</button>
+  <button class="pairbtn" onclick="const f=document.getElementById('sdframe'); f.style.display=(f.style.display==='none'?'block':'none'); if(f.style.display==='block') f.src='/digitizer/index.html?figure='+cur.fid;">⭐ StarryDigitizer</button>
   <span class="muted small">— click a curve to select it · add inserts into the line · drag a box in delete mode to erase a region · keys: 1/2/3 modes, M magnifier, ⌘Z undo · wheel zooms</span>
 </div>
 <div class="toolbar" style="margin:4px 0 8px">
@@ -1064,6 +1064,7 @@ def review_session_page(sid: int):
   <span class="muted small" id="amsg"></span>
 </div>
 <div style="overflow:auto;max-height:640px"><canvas id="cv" class="plot"></canvas></div>
+<iframe id="sdframe" style="display:none;width:100%;height:760px;border:1px solid var(--line);border-radius:8px;margin-top:8px"></iframe>
 <div style="display:flex;gap:14px;flex-wrap:wrap;margin-top:8px">
   <div style="min-width:260px"><h2>Curves</h2><div id="series"></div></div>
   <div><h2>Axes</h2>

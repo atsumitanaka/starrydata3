@@ -23,3 +23,27 @@
     
   </body>
 </html>
+<script>
+// Portal bridge v1: ?figure=<fid> auto-loads that review figure into the
+// digitizer's own image input (synthetic file selection).
+(async () => {
+  const fid = new URLSearchParams(location.search).get('figure');
+  if (!fid) return;
+  try {
+    const blob = await (await fetch('/ui/review/figure/' + fid + '.png')).blob();
+    const file = new File([blob], 'figure-' + fid + '.png', {type: 'image/png'});
+    const tryInject = () => {
+      const all = [...document.querySelectorAll('input[type=file]')];
+      const inp = all.find(i => (i.accept||'').includes('image'))
+               || all.find(i => !(i.accept||'').includes('zip'))
+               || all[1] || all[0];
+      if (!inp) return setTimeout(tryInject, 300);
+      const dt = new DataTransfer();
+      dt.items.add(file);
+      inp.files = dt.files;
+      inp.dispatchEvent(new Event('change', {bubbles: true}));
+    };
+    tryInject();
+  } catch (e) { console.warn('portal bridge:', e); }
+})();
+</script>
