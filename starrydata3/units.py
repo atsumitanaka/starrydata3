@@ -1,11 +1,11 @@
 # -*- coding: utf-8 -*-
 """
-units.py — unit normalization for KMDS data unification.
+units.py — unit normalization for NCMRD data unification.
 
 Materials figures report the same property in different units — Seebeck in
 μV/K vs V/K, conductivity as '10^4 S m^-1' vs 'S m^-1'. To overlay curves from
 different papers on one axis, values must be converted to the property's
-canonical KMDS unit. This does that conservatively: it only converts when the
+canonical NCMRD unit. This does that conservatively: it only converts when the
 two units share the same BASE (same physical quantity); otherwise it reports
 'incompatible' and the caller keeps the raw values + a flag.
 

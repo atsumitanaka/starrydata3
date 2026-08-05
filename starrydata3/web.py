@@ -93,7 +93,7 @@ def layout(title, active, body, extra_js=""):
 <meta name="viewport" content="width=device-width,initial-scale=1"><title>{esc(title)} · Starrydata3</title>
 <style>{CSS}</style></head><body>
 <header class="top"><div class="brand"><span class="star">&#9733;</span>Starrydata3</div>
-<nav>{nav}</nav><div class="sp">KMDS materials-data service</div></header>
+<nav>{nav}</nav><div class="sp">NCMRD materials-data service</div></header>
 <main>{body}</main><script>{extra_js}</script></body></html>""",
         headers={"Cache-Control": "no-store, must-revalidate", "Pragma": "no-cache"})
 
@@ -134,7 +134,7 @@ def home_page():
   <table><thead><tr><th>ID</th><th>Paper</th><th>Samples</th><th>Curves</th><th>Values</th></tr></thead>
   <tbody id="rows"></tbody></table>
   <div class="small" style="margin-top:10px">
-    <a href="/ui/export.json"><b>&#8681; Download full database (KMDS JSON)</b></a>
+    <a href="/ui/export.json"><b>&#8681; Download full database (NCMRD JSON)</b></a>
     &nbsp;·&nbsp; <a href="/ui/export.csv">&#8681; Dataset as CSV (all curves + values)</a>
     <span class="muted">— the JSON is a complete backup: re-upload each record to restore.</span>
   </div>
@@ -142,7 +142,7 @@ def home_page():
     js = """
 fetch('/ui/stats').then(r=>r.json()).then(s=>{
   const cells=[['records','Papers'],['curves','Curves'],['points','Data points'],
-    ['property_pairs','Property pairs'],['compositions','Compositions'],['vocabulary','KMDS properties']];
+    ['property_pairs','Property pairs'],['compositions','Compositions'],['vocabulary','NCMRD properties']];
   document.getElementById('stats').innerHTML = cells.map(([k,l])=>
     `<div class="stat"><b>${(s[k]??0).toLocaleString()}</b><span>${l}</span></div>`).join('');
 });
@@ -159,7 +159,7 @@ async function init(){
   PAIRS=(await (await fetch('/ui/pairs')).json()).pairs;
   document.getElementById('pairs').innerHTML = PAIRS.map((p,i)=>
     `<button class="pairbtn" data-i="${i}" onclick="pick(${i})">${esc(p.prop_x)}${esc(unitTag(p.unit_x))} vs ${esc(p.prop_y)}${esc(unitTag(p.unit_y))}`+
-    `<span class="n">${p.count}</span>${p.kmds?'':' <span title="not in KMDS vocabulary" style="color:#c0392b">&#9888;</span>'}</button>`).join('');
+    `<span class="n">${p.count}</span>${p.ncmrd?'':' <span title="not in NCMRD vocabulary" style="color:#c0392b">&#9888;</span>'}</button>`).join('');
   if(PAIRS.length) pick(0);
 }
 async function pick(i){
@@ -272,7 +272,7 @@ const drop=document.getElementById('drop'), fileIn=document.getElementById('file
 let RECORD=null, FNAME='';
 function esc(s){return (s+'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]))}
 function extract(text){
-  // accept a raw KMDS json OR an AutoLineDigitizer paper_record_view.html
+  // accept a raw NCMRD json OR an AutoLineDigitizer paper_record_view.html
   const m=text.match(/window\\.__STUDIO_RECORD\\s*=\\s*(\\{[\\s\\S]*?\\});\\s*\\n/);
   return JSON.parse(m?m[1]:text);
 }
@@ -307,8 +307,8 @@ def upload_page():
     body = """
 <div class="card">
   <h1>Upload a record</h1>
-  <p class="muted" style="margin-top:0">Drop a KMDS record (<code>.json</code>) or an
-  AutoLineDigitizer <code>paper_record_view.html</code>. It's validated against the KMDS
+  <p class="muted" style="margin-top:0">Drop a NCMRD record (<code>.json</code>) or an
+  AutoLineDigitizer <code>paper_record_view.html</code>. It's validated against the NCMRD
   schema, stored, and its curves indexed.</p>
   <div id="drop" style="border:2px dashed var(--line);border-radius:12px;padding:26px;text-align:center;
     background:#f6faff;cursor:pointer" onclick="document.getElementById('file').click()">
@@ -400,10 +400,10 @@ def _points_cards(points):
         return ""
     groups = {}
     for p in points:
-        g = groups.setdefault((p.prop, p.unit, p.source), {"kmds": p.kmds, "rows": []})
+        g = groups.setdefault((p.prop, p.unit, p.source), {"ncmrd": p.ncmrd, "rows": []})
         g["rows"].append(p)
     charts = ""
-    for (prop, unit, source), g in sorted(groups.items(), key=lambda kv: (not kv[1]["kmds"], kv[0][0])):
+    for (prop, unit, source), g in sorted(groups.items(), key=lambda kv: (not kv[1]["ncmrd"], kv[0][0])):
         rows = g["rows"]
         vmax = max(abs(r.value) for r in rows) or 1.0
         bars = ""
@@ -413,7 +413,7 @@ def _points_cards(points):
             bars += (f'<div class="bar-row"><div class="bar-label" title="{esc(r.entity)}">{esc(r.entity)}</div>'
                      f'<div class="bar-track"><div class="bar-fill" style="width:{max(2, abs(r.value) / vmax * 100):.1f}%"></div></div>'
                      f'<div class="bar-val">{_fmt_num(r.value)}{envt}</div></div>')
-        badge = "" if g["kmds"] else ' <span class="warn small" title="not in the KMDS vocabulary">&#9888; non-KMDS</span>'
+        badge = "" if g["ncmrd"] else ' <span class="warn small" title="not in the NCMRD vocabulary">&#9888; non-NCMRD</span>'
         src = "measured value" if source == "material" else "from table"
         charts += (f'<div class="pv"><div class="pv-head"><b>{esc(prop)}</b> '
                    f'<span class="muted small">{esc(unit) if unit else ""} · {src}</span>{badge}</div>{bars}</div>')
@@ -533,7 +533,7 @@ def _provenance_card(sid, entries):
 
 def record_page(rec, curves, points, record_json, flags=(), provenance=()):
     """rec: Record row; curves: GraphCurve rows; points: PointValue rows;
-    record_json: parsed KMDS dict; flags: QualityFlag rows."""
+    record_json: parsed NCMRD dict; flags: QualityFlag rows."""
     pub = (record_json.get("metadata") or {}).get("publication") or {}
     # group curves by property pair + unit for plotting (a Hz sweep and a GHz
     # sweep of the same property are different plots)
@@ -585,9 +585,9 @@ def record_page(rec, curves, points, record_json, flags=(), provenance=()):
             f'{"✓ valid" if rec.n_violations==0 else str(rec.n_violations)+" schema notes"}</div>'
             f'<h1>{esc(rec.title or "(untitled)")}</h1>'
             f'<a href="/">&larr; database</a> &nbsp;·&nbsp; '
-            f'<a href="/kmds/{rec.sid}"><b>full KMDS record</b></a> &nbsp;·&nbsp; '
+            f'<a href="/ncmrd/{rec.sid}"><b>full NCMRD record</b></a> &nbsp;·&nbsp; '
             f'<a href="/explore">explore curves</a> &nbsp;·&nbsp; '
-            f'<a href="/ui/record/{rec.sid}">raw KMDS JSON</a></div>')
+            f'<a href="/ui/record/{rec.sid}">raw NCMRD JSON</a></div>')
     body = (head + _consistency_card(flags) + abstract + _points_cards(points)
             + plots + _provenance_card(rec.sid, provenance) + _tables_cards(pub)
             + samp_card + mat_card + _figures_card(pub))
@@ -761,7 +761,7 @@ def review_list_page():
     body = """
 <div class="card"><h1>Batch review</h1>
 <p class="muted" style="margin-top:0">Papers extracted on the GPU land here as the batch runs.
-Open one to correct figures and edit its KMDS record, then approve to ingest.</p>
+Open one to correct figures and edit its NCMRD record, then approve to ingest.</p>
 <div style="overflow-x:auto"><table><tbody id="rbody"></tbody></table></div></div>"""
     return layout("Review", "review", body, REVIEW_LIST_JS)
 
@@ -1087,7 +1087,7 @@ def review_session_page(sid: int):
     </div>
   </div>
 </div></div>
-<div class="card"><h2>KMDS record (editable)</h2>
+<div class="card"><h2>NCMRD record (editable)</h2>
 <textarea id="krec" class="search" style="width:100%;height:300px;font-family:monospace;font-size:12px"></textarea>
 <div style="margin-top:8px;display:flex;gap:8px;align-items:center">
   <button class="pairbtn on" onclick="saveRecord()">Validate &amp; save</button>
@@ -1168,12 +1168,12 @@ def register_ui(app, engine, Record, GraphCurve, select, Session):
             record_json = json.loads(rec.record_json)
             return record_page(rec, curves, points, record_json, flags, prov)
  
-    @app.get("/kmds/{sid}", response_class=HTMLResponse)
-    def _kmds_view(sid: int):
-        """The full KMDS paper-record viewer (same renderer as AutoLineDigitizer's
+    @app.get("/ncmrd/{sid}", response_class=HTMLResponse)
+    def _ncmrd_view(sid: int):
+        """The full NCMRD paper-record viewer (same renderer as AutoLineDigitizer's
         standalone viewer), auto-loaded with this record."""
         import os
-        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "kmds_viewer.html")
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ncmrd_viewer.html")
         with open(path, encoding="utf-8") as f:
             html = f.read()
         boot = f"""

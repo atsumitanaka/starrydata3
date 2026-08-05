@@ -3,7 +3,7 @@
 manage.py — Starrydata3 admin CLI.
 
     python -m starrydata3.manage initdb
-    python -m starrydata3.manage seedprops [path/to/kmds_schema.json]
+    python -m starrydata3.manage seedprops [path/to/ncmrd_schema.json]
     python -m starrydata3.manage createkey <name> [--scope read|write|admin]
     python -m starrydata3.manage listkeys
     python -m starrydata3.manage recheck
@@ -21,9 +21,9 @@ from starrydata3.app import (APIKey, Property, SCHEMA_PATH, Session, engine,  # 
 _WRAPPER_KEYS = {"value", "unit", "uncertainty", "measurement"}
 
 
-def property_vocab_from_kmds(schema_path):
-    """(name, category, default_unit) triples from the KMDS property tree under
-    materials[].property — the exact vocabulary the KMDS extractor snaps axis
+def property_vocab_from_ncmrd(schema_path):
+    """(name, category, default_unit) triples from the NCMRD property tree under
+    materials[].property — the exact vocabulary the NCMRD extractor snaps axis
     names to, so Starrydata3 speaks the same language as the records it stores.
 
     A node is a PROPERTY LEAF (record its name) when its sub-properties are the
@@ -54,7 +54,7 @@ def property_vocab_from_kmds(schema_path):
                 collect(val["items"], name)                 # value-array group
             elif not cp or set(cp).issubset(_WRAPPER_KEYS):
                 vnode = cp.get("value") if isinstance(cp.get("value"), dict) else {}
-                # KMDS states the canonical unit in the leaf's value.examples
+                # NCMRD states the canonical unit in the leaf's value.examples
                 unit = (child.get("unit") or vnode.get("unit")
                         or vnode.get("examples") or "")
                 out.append((name, category, unit))           # property leaf
@@ -78,10 +78,10 @@ def cmd_initdb(_):
 def cmd_seedprops(args):
     from starrydata3.units import _clean
     path = args.schema or SCHEMA_PATH
-    vocab = property_vocab_from_kmds(path)
-    # local vocabulary extensions (terms official KMDS lacks, e.g. battery
+    vocab = property_vocab_from_ncmrd(path)
+    # local vocabulary extensions (terms official NCMRD lacks, e.g. battery
     # properties) — honestly labeled via their "(extension)" category.
-    ext_path = os.path.join(os.path.dirname(path), "kmds_vocab_extensions.json")
+    ext_path = os.path.join(os.path.dirname(path), "ncmrd_vocab_extensions.json")
     n_ext = 0
     if os.path.exists(ext_path):
         with open(ext_path, encoding="utf-8") as f:
@@ -164,10 +164,10 @@ def cmd_release(args):
               encoding="utf-8") as f:
         w = csv.writer(f)
         w.writerow(["sid", "doi", "entity", "source", "property", "value",
-                    "unit", "env_temperature_C", "kmds"])
+                    "unit", "env_temperature_C", "ncmrd"])
         for p in pvs:
             w.writerow([p.record_sid, p.doi, p.entity, p.source, p.prop,
-                        p.value, p.unit, p.env_temperature, p.kmds])
+                        p.value, p.unit, p.env_temperature, p.ncmrd])
 
     files = {}
     for name in ("records.json", "curves.csv", "point_values.csv"):

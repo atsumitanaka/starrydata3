@@ -1,10 +1,10 @@
 # -*- coding: utf-8 -*-
 """
-Starrydata3 — a private, KMDS-based materials-data service.
+Starrydata3 — a private, NCMRD-based materials-data service.
 
-The canonical stored object is a full **KMDS record** (the relational schema
+The canonical stored object is a full **NCMRD record** (the relational schema
 sensei's group uses: publication -> samples / figures -> graphs / materials).
-Records are validated against the KMDS schema on ingest, stored whole, and the
+Records are validated against the NCMRD schema on ingest, stored whole, and the
 digitized curves are indexed so the classic property-pair query (Temperature
 vs ZT, ...) works — the same value Starrydata2 provides — but writes go through
 a proper REST API with API-key auth instead of a session-only web form.
@@ -34,7 +34,7 @@ from starrydata3 import checks, composition, units
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 DB_PATH = os.environ.get("SD3_DB", os.path.join(ROOT, "starrydata3.db"))
-SCHEMA_PATH = os.environ.get("SD3_SCHEMA", os.path.join(ROOT, "kmds_schema.json"))
+SCHEMA_PATH = os.environ.get("SD3_SCHEMA", os.path.join(ROOT, "ncmrd_schema.json"))
 engine = create_engine(f"sqlite:///{DB_PATH}", connect_args={"check_same_thread": False})
 
 
@@ -43,21 +43,21 @@ def _now() -> str:
 
 
 @lru_cache(maxsize=1)
-def _raw_kmds_schema() -> Dict[str, Any]:
+def _raw_ncmrd_schema() -> Dict[str, Any]:
     with open(SCHEMA_PATH, encoding="utf-8") as f:
         return json.load(f)
 
 
 @lru_cache(maxsize=1)
-def kmds_schema() -> Dict[str, Any]:
-    """The Starrydata3 schema: the official KMDS schema PLUS the extensions
+def ncmrd_schema() -> Dict[str, Any]:
+    """The Starrydata3 schema: the official NCMRD schema PLUS the extensions
     Starrydata3 needs to store digitized curves — (1) `digitization_data` is a
     valid field on a graph (the base schema only has a text `digitization`
     note), and (2) the strict `g-NNN`/`f-NNN` local-id patterns are relaxed to
     accept AutoLineDigitizer's stub ids ("Figure 8"). Everything else is the
-    real KMDS schema, so records stay KMDS-conformant where it matters."""
+    real NCMRD schema, so records stay NCMRD-conformant where it matters."""
     import copy
-    sd = copy.deepcopy(_raw_kmds_schema())
+    sd = copy.deepcopy(_raw_ncmrd_schema())
     graph = (sd.get("$defs") or {}).get("graph") or {}
     gp = graph.get("properties")
     if isinstance(gp, dict):
@@ -82,13 +82,13 @@ def kmds_schema() -> Dict[str, Any]:
     return sd
 
 
-def validate_kmds(record: Dict[str, Any]) -> List[str]:
+def validate_ncmrd(record: Dict[str, Any]) -> List[str]:
     """Return a list of human-readable schema violations ([] == valid)."""
     try:
         import jsonschema
     except ImportError:
         return []   # validation optional; never block ingest if lib absent
-    v = jsonschema.Draft202012Validator(kmds_schema())
+    v = jsonschema.Draft202012Validator(ncmrd_schema())
     out = []
     for e in sorted(v.iter_errors(record), key=lambda e: list(e.path)):
         loc = "/".join(str(x) for x in e.path) or "(root)"
@@ -110,13 +110,13 @@ class APIKey(SQLModel, table=True):
 
 
 class Record(SQLModel, table=True):
-    """One KMDS record (whole JSON kept verbatim)."""
+    """One NCMRD record (whole JSON kept verbatim)."""
     id: Optional[int] = Field(default=None, primary_key=True)
     sid: Optional[int] = Field(default=None, index=True)
     doi: str = Field(index=True, unique=True)
     title: str = ""
     project: str = "default"
-    record_json: str = ""                # the full KMDS record
+    record_json: str = ""                # the full NCMRD record
     n_violations: int = 0
     created_at: str = Field(default_factory=_now)
     updated_at: str = Field(default_factory=_now)
@@ -133,10 +133,10 @@ class GraphCurve(SQLModel, table=True):
     prop_y: str = Field(default="", index=True)
     unit_x: str = ""
     unit_y: str = ""
-    points_json: str = "[]"       # points normalized to canonical KMDS units
+    points_json: str = "[]"       # points normalized to canonical NCMRD units
     raw_points_json: str = "[]"   # original values as digitized
     n_points: int = 0
-    kmds: bool = True          # both axis properties are in the KMDS vocabulary
+    ncmrd: bool = True          # both axis properties are in the NCMRD vocabulary
     unit_normalized: bool = False  # x and/or y were converted to canonical units
     comp_key: str = Field(default="", index=True)  # canonical composition key
     elements: str = ""             # space-separated element symbols, sorted
@@ -144,22 +144,22 @@ class GraphCurve(SQLModel, table=True):
 
 class PointValue(SQLModel, table=True):
     """A single measured property value, extracted from a record's material
-    property trees and data tables — the KMDS data most papers carry even when
+    property trees and data tables — the NCMRD data most papers carry even when
     nothing was digitized from a plot."""
     id: Optional[int] = Field(default=None, primary_key=True)
     record_sid: int = Field(index=True)
     doi: str = Field(index=True)
     entity: str = ""                 # the material / sample the value belongs to
     source: str = "material"         # material (property tree) | table
-    prop: str = Field(default="", index=True)   # canonical KMDS term, or raw name
+    prop: str = Field(default="", index=True)   # canonical NCMRD term, or raw name
     raw_prop: str = ""
-    category: str = ""               # KMDS property-tree branch, if known
+    category: str = ""               # NCMRD property-tree branch, if known
     value: float = 0.0               # in `unit` (canonical where convertible)
     raw_value: float = 0.0
     unit: str = ""
     raw_unit: str = ""
     env_temperature: Optional[float] = None      # measurement temperature, °C as recorded
-    kmds: bool = True
+    ncmrd: bool = True
     unit_normalized: bool = False
 
 
@@ -209,7 +209,7 @@ class ReviewSession(SQLModel, table=True):
     doi: str = Field(default="", index=True)
     title: str = ""
     status: str = "ready"           # ready | in_review | approved
-    record_json: str = "{}"         # KMDS record (curator-editable)
+    record_json: str = "{}"         # NCMRD record (curator-editable)
     n_figures: int = 0
     created_at: str = Field(default_factory=_now)
     updated_at: str = Field(default_factory=_now)
@@ -273,7 +273,7 @@ def require_scope(min_scope: str):
 
 
 # ---------------------------------------------------------------------------
-# KMDS record helpers
+# NCMRD record helpers
 # ---------------------------------------------------------------------------
 
 def _publication(record: Dict[str, Any]) -> Dict[str, Any]:
@@ -285,9 +285,9 @@ def _norm_prop(s: str) -> str:
     return re.sub(r"[^a-z0-9]+", " ", (s or "").lower()).strip()
 
 
-# Hand synonyms: alternate wording -> a term that is ACTUALLY in the KMDS
+# Hand synonyms: alternate wording -> a term that is ACTUALLY in the NCMRD
 # vocabulary. Every target here is verified to exist; we never self-map a term
-# just to make it look conformant. Independent variables that KMDS's
+# just to make it look conformant. Independent variables that NCMRD's
 # material-property vocabulary does not define (frequency, voltage, capacity,
 # time, cycle number, ...) are intentionally absent, so they stay flagged.
 _PROP_SYNONYMS = {
@@ -300,7 +300,7 @@ _PROP_SYNONYMS = {
     "tan delta": "loss tangent", "dissipation factor": "loss tangent",
     "t g": "glass transition temperature", "tg": "glass transition temperature",
     # battery axis wordings -> extension vocabulary terms (seeded from
-    # kmds_vocab_extensions.json; honestly categorized "(extension)")
+    # ncmrd_vocab_extensions.json; honestly categorized "(extension)")
     "amphrs": "capacity", "amp hrs": "capacity", "amp hours": "capacity",
     "ah": "capacity", "mah": "capacity", "amp hr": "capacity",
     "volts": "voltage", "volt": "voltage", "cell voltage": "voltage", "discharge capacity": "capacity",
@@ -313,10 +313,10 @@ _PROP_SYNONYMS = {
 
 def match_property(name: str, vocab_norm: Dict[str, str],
                    unit: str = "") -> Optional[str]:
-    """Map an axis/OCR property name onto a canonical KMDS vocabulary term.
+    """Map an axis/OCR property name onto a canonical NCMRD vocabulary term.
     Exact-normalized match, then a hand synonym, then a unique substring hit.
     The unit disambiguates single-letter symbols ('T' + kelvin -> temperature).
-    Returns the canonical term, or None if it is not a KMDS property."""
+    Returns the canonical term, or None if it is not a NCMRD property."""
     import re
     n = _norm_prop(name)
     if not n:
@@ -361,7 +361,7 @@ _UNIT_TEX = [(r"\^\{\\circ\}\s*C", "°C"), (r"\\circ", "°"), (r"\\Omega", "Ω")
 
 
 def sanitize_unit(unit: Optional[str]) -> str:
-    """KMDS units carry LaTeX ('mA\\ h\\ g^{-1}', '^{\\circ}C', '\\Omega'); make
+    """NCMRD units carry LaTeX ('mA\\ h\\ g^{-1}', '^{\\circ}C', '\\Omega'); make
     them plain text for storage + display."""
     import re
     u = unit or "-"
@@ -406,9 +406,9 @@ def _match_donor(xr, yr, n_series, donors):
 
 
 def extract_curves(record: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """Pull digitized curves out of a KMDS record for the property-pair index.
+    """Pull digitized curves out of a NCMRD record for the property-pair index.
     Graphs whose own axes are real are used directly; curves on placeholder
-    (X/Y) stub graphs are matched to a KMDS donor graph by value-range so they
+    (X/Y) stub graphs are matched to a NCMRD donor graph by value-range so they
     still inherit real axis identity + samples. Uncalibrated (pixel-space)
     curves match nothing and are skipped."""
     pub = _publication(record)
@@ -473,7 +473,7 @@ def extract_curves(record: Dict[str, Any]) -> List[Dict[str, Any]]:
 
 
 def _value_leaves(node, path=()):
-    """Yield (path, value_obj) for every {"value": scalar, ...} leaf in a KMDS
+    """Yield (path, value_obj) for every {"value": scalar, ...} leaf in a NCMRD
     material property tree. A value object is not recursed into (its
     `measurement` block holds environment fields, not further properties)."""
     if isinstance(node, dict):
@@ -503,7 +503,7 @@ def _split_header_unit(header: str):
     return name, unit, env_t
 
 
-# DMA notation used in table headers; targets verified in the KMDS vocabulary.
+# DMA notation used in table headers; targets verified in the NCMRD vocabulary.
 _DMA_HEADER = {"E'": "storage modulus", "E''": "loss modulus"}
 
 
@@ -526,7 +526,7 @@ def _caption_symbol_map(tbl: Dict[str, Any]) -> Dict[str, str]:
 
 
 def extract_point_values(record: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """Pull single measured values out of a KMDS record: (1) every value leaf
+    """Pull single measured values out of a NCMRD record: (1) every value leaf
     of each material's `property` tree, (2) every numeric cell of each data
     table, keyed by the row's label column. These are what a paper contributes
     when its plots were not digitized."""
@@ -570,7 +570,7 @@ def _normalize_point(value: float, raw_unit: str, canon: str):
     if not canon:
         return value, raw_unit, False
     if not raw_unit:
-        return value, canon, False       # KMDS property trees imply canonical units
+        return value, canon, False       # NCMRD property trees imply canonical units
     if canon == "K" and raw_unit.replace(" ", "") in ("°C", "C", "degC", "℃"):
         return value + 273.15, "K", True
     f, ok = units.convert_factor(raw_unit, canon)
@@ -584,7 +584,7 @@ def _normalize_point(value: float, raw_unit: str, canon: str):
 # ---------------------------------------------------------------------------
 
 app = FastAPI(title="Starrydata3", version="0.0.1",
-              description="Private, KMDS-based materials-data service with API-key writes.")
+              description="Private, NCMRD-based materials-data service with API-key writes.")
 
 
 from fastapi.staticfiles import StaticFiles as _StaticFiles
@@ -599,6 +599,11 @@ def init_db():
     # additive migrations for columns create_all won't add to existing tables
     from sqlalchemy import text
     with engine.connect() as conn:
+        # KMDS -> NCMRD rename (2026-08): legacy DBs carry a `kmds` column
+        for table in ("graphcurve", "pointvalue"):
+            tcols = {r[1] for r in conn.execute(text(f"PRAGMA table_info({table})"))}
+            if "kmds" in tcols and "ncmrd" not in tcols:
+                conn.execute(text(f"ALTER TABLE {table} RENAME COLUMN kmds TO ncmrd"))
         cols = {r[1] for r in conn.execute(text("PRAGMA table_info(graphcurve)"))}
         for col, decl in (("comp_key", "VARCHAR DEFAULT ''"),
                           ("elements", "VARCHAR DEFAULT ''")):
@@ -618,8 +623,8 @@ def health():
 @app.post("/api/v1/validate")
 def validate_only(record: Dict[str, Any] = Body(...),
                   key: APIKey = Depends(require_scope("read"))):
-    """Check a KMDS record against the schema WITHOUT storing it."""
-    viol = validate_kmds(record)
+    """Check a NCMRD record against the schema WITHOUT storing it."""
+    viol = validate_ncmrd(record)
     return {"valid": not viol, "n_violations": len(viol), "violations": viol,
             "n_curves": len(extract_curves(record))}
 
@@ -632,7 +637,7 @@ def store_record(record: Dict[str, Any], strict: bool = False) -> Dict[str, Any]
     doi = (pub.get("DOI") or "").strip()
     if not doi:
         raise HTTPException(400, "record has no metadata.publication.DOI")
-    viol = validate_kmds(record)
+    viol = validate_ncmrd(record)
     if strict and viol:
         raise HTTPException(422, {"error": "schema violations", "violations": viol})
 
@@ -660,22 +665,22 @@ def store_record(record: Dict[str, Any], strict: bool = False) -> Dict[str, Any]
         for old in s.exec(select(GraphCurve).where(GraphCurve.record_sid == sid)).all():
             s.delete(old)
         curves = extract_curves(record)
-        # normalize axis properties to the KMDS vocabulary + convert values to
-        # each property's canonical KMDS unit (data unification). Keep raw term
+        # normalize axis properties to the NCMRD vocabulary + convert values to
+        # each property's canonical NCMRD unit (data unification). Keep raw term
         # / raw values + flags where a match or conversion isn't possible.
         props = s.exec(select(Property)).all()
         vocab_norm = {_norm_prop(p.name): p.name for p in props}
         canon_unit = {p.name: (p.default_unit or "") for p in props}
-        non_kmds = set()
-        n_kmds = n_norm = 0
+        non_ncmrd = set()
+        n_ncmrd = n_norm = 0
         for c in curves:
             cx = match_property(c["prop_x"], vocab_norm, unit=c["unit_x"])
             cy = match_property(c["prop_y"], vocab_norm, unit=c["unit_y"])
             if cx is None:
-                non_kmds.add(c["prop_x"])
+                non_ncmrd.add(c["prop_x"])
             if cy is None:
-                non_kmds.add(c["prop_y"])
-            is_kmds = cx is not None and cy is not None
+                non_ncmrd.add(c["prop_y"])
+            is_ncmrd = cx is not None and cy is not None
 
             ux, uy = c["unit_x"], c["unit_y"]
             fx, fy = 1.0, 1.0
@@ -695,7 +700,7 @@ def store_record(record: Dict[str, Any], strict: bool = False) -> Dict[str, Any]
             raw = c["points"]
             pts = ([[p[0] * fx, p[1] * fy] for p in raw]
                    if (fx != 1.0 or fy != 1.0) else raw)
-            n_kmds += 1 if is_kmds else 0
+            n_ncmrd += 1 if is_ncmrd else 0
             n_norm += 1 if normed else 0
             ck, els = "", ""
             for cand in ([c["composition"] or c["sample_name"]]
@@ -706,7 +711,7 @@ def store_record(record: Dict[str, Any], strict: bool = False) -> Dict[str, Any]
             s.add(GraphCurve(record_sid=sid, doi=doi, sample_name=c["sample_name"],
                              composition=c["composition"],
                              prop_x=cx or c["prop_x"], prop_y=cy or c["prop_y"],
-                             unit_x=ux, unit_y=uy, kmds=is_kmds, unit_normalized=normed,
+                             unit_x=ux, unit_y=uy, ncmrd=is_ncmrd, unit_normalized=normed,
                              points_json=json.dumps(pts), raw_points_json=json.dumps(raw),
                              n_points=len(pts), comp_key=ck, elements=els))
 
@@ -714,13 +719,13 @@ def store_record(record: Dict[str, Any], strict: bool = False) -> Dict[str, Any]
         for old in s.exec(select(PointValue).where(PointValue.record_sid == sid)).all():
             s.delete(old)
         pvs = extract_point_values(record)
-        n_kmds_pts = 0
+        n_ncmrd_pts = 0
         for p in pvs:
             cp = match_property(p["raw_prop"], vocab_norm, unit=p["raw_unit"])
             if cp is None:
-                non_kmds.add(p["raw_prop"])
+                non_ncmrd.add(p["raw_prop"])
             else:
-                n_kmds_pts += 1
+                n_ncmrd_pts += 1
             val, unit, normed = _normalize_point(
                 p["value"], p["raw_unit"], canon_unit.get(cp or "", ""))
             s.add(PointValue(record_sid=sid, doi=doi, entity=p["entity"],
@@ -728,7 +733,7 @@ def store_record(record: Dict[str, Any], strict: bool = False) -> Dict[str, Any]
                              raw_prop=p["raw_prop"], category=p["category"],
                              value=val, raw_value=p["value"], unit=unit,
                              raw_unit=p["raw_unit"], env_temperature=p["env_temperature"],
-                             kmds=cp is not None, unit_normalized=normed))
+                             ncmrd=cp is not None, unit_normalized=normed))
         s.commit()
 
         # cross-property consistency checks (PF = S²σ, ZT = S²σT/κ, ...)
@@ -737,9 +742,9 @@ def store_record(record: Dict[str, Any], strict: bool = False) -> Dict[str, Any]
     return {"ok": True, "sid": sid, "doi": doi, "title": title,
             "n_violations": len(viol), "violations": viol[:20],
             "curves_indexed": len(curves),
-            "kmds_curves": n_kmds, "unit_normalized_curves": n_norm,
-            "points_indexed": len(pvs), "kmds_points": n_kmds_pts,
-            "non_kmds_properties": sorted(non_kmds),
+            "ncmrd_curves": n_ncmrd, "unit_normalized_curves": n_norm,
+            "points_indexed": len(pvs), "ncmrd_points": n_ncmrd_pts,
+            "non_ncmrd_properties": sorted(non_ncmrd),
             "consistency_flags": flags}
 
 
@@ -762,7 +767,7 @@ def run_checks(sid: int, s: Session) -> List[Dict[str, Any]]:
 
 def _digitization_stub(record: Dict[str, Any]) -> bool:
     """A record that carries digitized curves but no publication metadata —
-    what the desktop app produces when no KMDS record was loaded. Uploading
+    what the desktop app produces when no NCMRD record was loaded. Uploading
     one must enrich an existing stored record, never clobber it."""
     pub = _publication(record)
     has_dig = any(g.get("digitization_data")
@@ -777,7 +782,7 @@ def _digitization_stub(record: Dict[str, Any]) -> bool:
 def submit_record(record: Dict[str, Any] = Body(...),
                   strict: bool = False,
                   key: APIKey = Depends(require_scope("write"))):
-    """Ingest a full KMDS record: validate, upsert by DOI, index its curves.
+    """Ingest a full NCMRD record: validate, upsert by DOI, index its curves.
     strict=true rejects a record with any schema violation (422). A
     digitization-only stub (curves, no metadata) whose DOI already exists is
     MERGED into the stored record instead of replacing it."""
@@ -794,7 +799,7 @@ def merge_digitized(record: Dict[str, Any]) -> Dict[str, Any]:
     """A digitization-only record whose DOI is already in the database is
     GRAFTED into the stored record — its figures and samples are appended
     (ids remapped to avoid collisions) so digitizing a paper's PDF enriches
-    the existing KMDS record instead of replacing it."""
+    the existing NCMRD record instead of replacing it."""
     pub = _publication(record)
     doi = (pub.get("DOI") or "").strip()
     if not doi:
@@ -887,8 +892,8 @@ def add_property(body: Dict[str, Any] = Body(...),
     """Grow the vocabulary with an EXTENSION term (new properties inevitably
     turn up — AutoLineDigitizer posts Claude-proposed terms here so app and
     server stay in sync). The term is added to the Property table AND appended
-    to kmds_vocab_extensions.json, so a reseed/fresh install keeps it. Official
-    KMDS terms are never modified; duplicates are no-ops."""
+    to ncmrd_vocab_extensions.json, so a reseed/fresh install keeps it. Official
+    NCMRD terms are never modified; duplicates are no-ops."""
     name = (body.get("name") or "").strip()
     if not name:
         raise HTTPException(400, "property needs a name")
@@ -908,7 +913,7 @@ def add_property(body: Dict[str, Any] = Body(...),
         s.commit()
 
     ext_path = os.environ.get("SD3_VOCAB_EXT",
-                              os.path.join(ROOT, "kmds_vocab_extensions.json"))
+                              os.path.join(ROOT, "ncmrd_vocab_extensions.json"))
     try:
         with open(ext_path, encoding="utf-8") as f:
             doc = json.load(f)
@@ -1011,7 +1016,7 @@ def ui_papers(q: str = "", atom: str = ""):
 @app.get("/ui/pairs")
 def ui_pairs():
     """Property pairs are split by UNIT as well: a frequency sweep in Hz and
-    one in GHz are different axes, and without a canonical KMDS unit for the
+    one in GHz are different axes, and without a canonical NCMRD unit for the
     property they must never be overlaid on one plot."""
     with Session(engine) as s:
         curves = s.exec(select(GraphCurve)).all()
@@ -1019,21 +1024,21 @@ def ui_pairs():
     counts = {}
     for c in curves:
         d = counts.setdefault((c.prop_x, c.prop_y, c.unit_x, c.unit_y),
-                              {"n": 0, "kmds": True, "points": False})
+                              {"n": 0, "ncmrd": True, "points": False})
         d["n"] += 1
-        if not c.kmds:
-            d["kmds"] = False
+        if not c.ncmrd:
+            d["ncmrd"] = False
     for p in pvs:
         if p.env_temperature is None:
             continue
         d = counts.setdefault(("temperature", p.prop, "K", p.unit),
-                              {"n": 0, "kmds": True, "points": False})
+                              {"n": 0, "ncmrd": True, "points": False})
         d["n"] += 1
         d["points"] = True
-        if not p.kmds:
-            d["kmds"] = False
+        if not p.ncmrd:
+            d["ncmrd"] = False
     return {"pairs": [{"prop_x": x, "prop_y": y, "unit_x": ux, "unit_y": uy,
-                       "count": d["n"], "kmds": d["kmds"], "points": d["points"]}
+                       "count": d["n"], "ncmrd": d["ncmrd"], "points": d["points"]}
                       for (x, y, ux, uy), d in sorted(counts.items(), key=lambda kv: -kv[1]["n"])]}
 
 
@@ -1087,7 +1092,7 @@ def _crossref_meta(doi: str) -> Dict[str, Any]:
         import httpx
         r = httpx.get(f"https://api.crossref.org/works/{doi}",
                       timeout=15.0,
-                      headers={"User-Agent": "starrydata3 (mailto:kmds@local)"})
+                      headers={"User-Agent": "starrydata3 (mailto:ncmrd@local)"})
         r.raise_for_status()
         m = r.json().get("message") or {}
         authors = ", ".join(
@@ -1225,7 +1230,7 @@ def ui_facet(prop: str, vmin: Optional[float] = None, vmax: Optional[float] = No
 @app.post("/api/v1/review/sessions")
 def push_review_session(body: Dict[str, Any] = Body(...),
                         key: APIKey = Depends(require_scope("write"))):
-    """Batch runner drop-off: KMDS record + digitized figures for one paper.
+    """Batch runner drop-off: NCMRD record + digitized figures for one paper.
     Replaces an existing session with the same pdf_name (re-runs stay clean)."""
     import base64
     pdf_name = (body.get("pdf") or "").strip()
@@ -1389,7 +1394,7 @@ def patch_review_figure(fid: int, body: Dict[str, Any] = Body(...),
 @app.patch("/api/v1/review/session/{sid}")
 def patch_review_session(sid: int, body: Dict[str, Any] = Body(...),
                          key: APIKey = Depends(require_scope("write"))):
-    """Curator saves the edited KMDS record; response includes live schema
+    """Curator saves the edited NCMRD record; response includes live schema
     validation so the portal can show violations as they edit."""
     with Session(engine) as s:
         r = s.get(ReviewSession, sid)
@@ -1401,14 +1406,14 @@ def patch_review_session(sid: int, body: Dict[str, Any] = Body(...),
             if r.status == "ready":
                 r.status = "in_review"
             s.add(r); s.commit()
-        viol = validate_kmds(json.loads(r.record_json))
+        viol = validate_ncmrd(json.loads(r.record_json))
     return {"ok": True, "n_violations": len(viol), "violations": viol[:20]}
 
 
 @app.post("/api/v1/review/session/{sid}/approve")
 def approve_review_session(sid: int, key: APIKey = Depends(require_scope("write"))):
     """Graft every non-rejected figure's (curator-edited) curves into the
-    KMDS record, ingest it into the real database, and attach provenance
+    NCMRD record, ingest it into the real database, and attach provenance
     (crop + calibration) — the batch papers' final step."""
     import base64
     with Session(engine) as s:
@@ -1660,7 +1665,7 @@ def ui_record_points(sid: int):
     for p in rows:
         g = groups.setdefault((p.prop, p.unit, p.source), {
             "prop": p.prop, "unit": p.unit, "source": p.source,
-            "kmds": p.kmds, "category": p.category, "entries": []})
+            "ncmrd": p.ncmrd, "category": p.category, "entries": []})
         g["entries"].append({"entity": p.entity, "value": p.value,
                              "env_temperature": p.env_temperature})
     order = {"fail": 0, "warn": 1, "ok": 2}
@@ -1670,7 +1675,7 @@ def ui_record_points(sid: int):
                     for f in flag_rows),
                    key=lambda f: (order.get(f["status"], 3), f["sample"]))
     return {"sid": sid, "groups": sorted(groups.values(),
-                                         key=lambda g: (not g["kmds"], g["prop"])),
+                                         key=lambda g: (not g["ncmrd"], g["prop"])),
             "consistency": flags}
 
 
@@ -1717,7 +1722,7 @@ def ui_export_csv():
 
 @app.get("/ui/export.json")
 def ui_export_json():
-    """Every stored KMDS record, verbatim — the full-fidelity local backup.
+    """Every stored NCMRD record, verbatim — the full-fidelity local backup.
     Re-uploading each record recreates the database (curves and measured
     values are re-indexed on ingest)."""
     from fastapi import Response

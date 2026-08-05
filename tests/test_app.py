@@ -28,16 +28,16 @@ def _make_key(scope="write"):
 
 
 def _seed_vocab():
-    """Seed the KMDS property vocabulary (canonical names + units) so property
+    """Seed the NCMRD property vocabulary (canonical names + units) so property
     normalization and unit conversion are exercised."""
     from starrydata3.app import Property, SCHEMA_PATH
-    from starrydata3.manage import property_vocab_from_kmds
+    from starrydata3.manage import property_vocab_from_ncmrd
     from starrydata3.units import _clean
     init_db()
     with Session(engine) as s:
         if s.exec(select(Property)).first():
             return
-        for n, c, u in property_vocab_from_kmds(SCHEMA_PATH):
+        for n, c, u in property_vocab_from_ncmrd(SCHEMA_PATH):
             cu = _clean(u)
             cu = "" if cu.lower() in ("none", "-") else cu
             s.add(Property(name=n, category=c, default_unit=cu))
@@ -99,13 +99,13 @@ def test_submit_and_query(client, wkey, rkey):
     sid = body["sid"]
     assert body["ok"] and body["curves_indexed"] == 1 and body["doi"] == "10.1234/test.001"
 
-    # fetch full KMDS record back
+    # fetch full NCMRD record back
     r = client.get(f"/api/v1/records/{sid}", headers={"X-API-Key": rkey})
     assert r.status_code == 200
     assert r.json()["metadata"]["publication"]["DOI"] == "10.1234/test.001"
 
     # property-pair query returns the curve with real points (props are
-    # normalized to the canonical KMDS vocabulary term, e.g. Temperature->temperature)
+    # normalized to the canonical NCMRD vocabulary term, e.g. Temperature->temperature)
     r = client.get("/api/v1/graphs", params={"prop_x": "temperature", "prop_y": "ZT"},
                    headers={"X-API-Key": rkey})
     assert r.status_code == 200
@@ -113,7 +113,7 @@ def test_submit_and_query(client, wkey, rkey):
     assert g["count"] == 1
     assert g["curves"][0]["composition"] == "TaFeSb"
     assert g["curves"][0]["points"][0] == [300, 0.2]
-    assert body["kmds_curves"] == 1 and body["non_kmds_properties"] == []
+    assert body["ncmrd_curves"] == 1 and body["non_ncmrd_properties"] == []
 
 
 def test_upsert_by_doi(client, wkey):
@@ -184,18 +184,18 @@ def test_point_values_indexed(client, wkey, rkey):
     by_prop = {g["prop"]: g for g in d["groups"]}
     # material property tree, canonical term + implied canonical unit
     tc = by_prop["thermal conductivity"]
-    assert tc["kmds"] and tc["unit"] == "W m^-1 K^-1"
+    assert tc["ncmrd"] and tc["unit"] == "W m^-1 K^-1"
     assert tc["entries"][0] == {"entity": "A", "value": 0.38, "env_temperature": 25.0}
     # table columns: T_g synonym + °C→K, E' DMA notation → storage modulus
     tg = by_prop["glass transition temperature"]
-    assert tg["kmds"] and tg["unit"] == "K"
+    assert tg["ncmrd"] and tg["unit"] == "K"
     assert abs(tg["entries"][0]["value"] - (199.0 + 273.15)) < 1e-9
     sm = by_prop["storage modulus"]
-    assert sm["kmds"] and sm["unit"] == "MPa"          # vocab has no canonical unit
+    assert sm["ncmrd"] and sm["unit"] == "MPa"          # vocab has no canonical unit
     assert sm["entries"][0]["env_temperature"] == 30.0  # parsed from "at 30 °C"
     # unknown property stays raw and is flagged, never silently mapped
-    assert by_prop["υ_e"]["kmds"] is False
-    assert "υ_e" in body["non_kmds_properties"]
+    assert by_prop["υ_e"]["ncmrd"] is False
+    assert "υ_e" in body["non_ncmrd_properties"]
 
 
 def test_point_values_in_explorer(client, wkey):
@@ -248,7 +248,7 @@ def test_vocabulary_grows_via_api(client, wkey, rkey):
                 {"label": "LLZO", "points_data": [[300, 1e-4], [400, 1e-3], [500, 5e-3]]}]}}]}],
     }}, "materials": [{"id": "material_01", "name": "LLZO"}]}
     r = client.post("/api/v1/records", json=rec, headers={"X-API-Key": wkey})
-    assert r.status_code == 200 and r.json()["kmds_curves"] == 1
+    assert r.status_code == 200 and r.json()["ncmrd_curves"] == 1
 
 
 def test_json_full_export(client, wkey):
@@ -263,7 +263,7 @@ def test_json_full_export(client, wkey):
 
 def test_caption_symbol_mapping(client, wkey):
     """Header symbols are resolved through the table's own caption definitions:
-    'Young's modulus (E) and Poisson's ratio (γ)' makes columns E/γ KMDS."""
+    'Young's modulus (E) and Poisson's ratio (γ)' makes columns E/γ NCMRD."""
     rec = {"metadata": {"publication": {
         "DOI": "10.9/sym.1", "title": "Symbols",
         "samples": [{"sample local id": "s-001", "name": "n-FAST",
@@ -278,11 +278,11 @@ def test_caption_symbol_mapping(client, wkey):
     r = client.post("/api/v1/records", json=rec, headers={"X-API-Key": wkey})
     assert r.status_code == 200, r.text
     body = r.json()
-    assert body["kmds_points"] == 2 and body["points_indexed"] == 2
+    assert body["ncmrd_points"] == 2 and body["points_indexed"] == 2
     d = client.get(f"/ui/record_points/{body['sid']}").json()
     by_prop = {g["prop"]: g for g in d["groups"]}
-    assert by_prop["Young's modulus"]["kmds"] and by_prop["Young's modulus"]["unit"] == "GPa"
-    assert by_prop["Poisson's ratio"]["kmds"]
+    assert by_prop["Young's modulus"]["ncmrd"] and by_prop["Young's modulus"]["unit"] == "GPa"
+    assert by_prop["Poisson's ratio"]["ncmrd"]
 
 
 def test_stub_upload_merges_instead_of_clobbering(client, wkey):
@@ -321,17 +321,17 @@ def test_stub_upload_merges_instead_of_clobbering(client, wkey):
     # donor-matched onto the rich record's real graph
     rec = client.get(f"/api/v1/records/{sid}", headers={"X-API-Key": wkey}).json()
     assert rec["metadata"]["publication"]["title"] == "Rich record"
-    assert body["curves_indexed"] == 1 and body["kmds_curves"] == 1
+    assert body["curves_indexed"] == 1 and body["ncmrd_curves"] == 1
     g = client.get("/ui/graph", params={"prop_x": "temperature", "prop_y": "ZT"}).json()
     assert any(c["sid"] == sid and c["sample"] == "M1" for c in g["curves"])
 
 
-def test_record_page_and_kmds_viewer(client, wkey):
+def test_record_page_and_ncmrd_viewer(client, wkey):
     sids = {r["doi"]: r["sid"] for r in
             client.get("/api/v1/records", headers={"X-API-Key": wkey}).json()["records"]}
     sid = sids["10.9/pts.1"]
     page = client.get(f"/view/{sid}").text
     assert "Measured properties" in page and "glass transition temperature" in page
-    assert "Table 1" in page                       # KMDS table rendered
-    viewer = client.get(f"/kmds/{sid}").text
+    assert "Table 1" in page                       # NCMRD table rendered
+    viewer = client.get(f"/ncmrd/{sid}").text
     assert "validateAndRender" in viewer and f"/ui/record/{sid}" in viewer

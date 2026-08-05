@@ -31,13 +31,13 @@ def _make_key(scope="write"):
 
 
 def _seed_vocab():
-    from starrydata3.manage import property_vocab_from_kmds
+    from starrydata3.manage import property_vocab_from_ncmrd
     from starrydata3.units import _clean
     init_db()
     with Session(engine) as s:
         if s.exec(select(Property)).first():
             return
-        for n, c, u in property_vocab_from_kmds(SCHEMA_PATH):
+        for n, c, u in property_vocab_from_ncmrd(SCHEMA_PATH):
             cu = _clean(u)
             cu = "" if cu.lower() in ("none", "-") else cu
             s.add(Property(name=n, category=c, default_unit=cu))
@@ -56,7 +56,7 @@ def wkey():
 
 
 def _te_record(doi, sample, curves):
-    """A KMDS record with one thermoelectric sample and the given
+    """A NCMRD record with one thermoelectric sample and the given
     {(prop_term, unit): points} temperature curves."""
     figures = []
     for i, ((term, unit), pts) in enumerate(curves.items(), start=1):

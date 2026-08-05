@@ -33,12 +33,12 @@ def _make_key(scope="write"):
 
 @pytest.fixture(scope="module")
 def client():
-    from starrydata3.manage import property_vocab_from_kmds
+    from starrydata3.manage import property_vocab_from_ncmrd
     from starrydata3.units import _clean
     init_db()
     with Session(engine) as s:
         if not s.exec(select(Property)).first():
-            for n, c, u in property_vocab_from_kmds(SCHEMA_PATH):
+            for n, c, u in property_vocab_from_ncmrd(SCHEMA_PATH):
                 cu = _clean(u)
                 cu = "" if cu.lower() in ("none", "-") else cu
                 s.add(Property(name=n, category=c, default_unit=cu))

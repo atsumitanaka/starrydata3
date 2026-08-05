@@ -10,7 +10,7 @@ most damaging real-world failures — axis-unit and exponent mistakes (in the
 digitization OR the paper itself) — which published curation projects report
 as their worst outlier class.
 
-All values are converted to SI here (independent of KMDS canonical units,
+All values are converted to SI here (independent of NCMRD canonical units,
 which are sometimes non-SI, e.g. Seebeck in μV/K). The unit parser handles
 per-token SI prefixes, exponents, powers of ten, and the Ω⁻¹ ↔ S equivalence.
 """

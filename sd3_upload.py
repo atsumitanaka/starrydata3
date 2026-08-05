@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-sd3_upload.py — push a KMDS record (e.g. from AutoLineDigitizer) into a
+sd3_upload.py — push a NCMRD record (e.g. from AutoLineDigitizer) into a
 Starrydata3 server through its REST API with an API key. No browser, no
 session — just an HTTP call.
 
     python sd3_upload.py record.json --url http://localhost:8300 --key sd3_...
     python sd3_upload.py record.json --url ... --key ... --validate   # dry-run
 
-Accepts either a raw KMDS record JSON, or an AutoLineDigitizer
+Accepts either a raw NCMRD record JSON, or an AutoLineDigitizer
 paper_record_view.html (the merged window.__STUDIO_RECORD is extracted).
 """
 import argparse
@@ -34,7 +34,7 @@ def main():
     ap.add_argument("--url", required=True, help="Starrydata3 base URL")
     ap.add_argument("--key", required=True, help="API key (sd3_...)")
     ap.add_argument("--validate", action="store_true",
-                    help="dry-run: validate against KMDS schema without storing")
+                    help="dry-run: validate against NCMRD schema without storing")
     ap.add_argument("--strict", action="store_true",
                     help="reject on any schema violation")
     args = ap.parse_args()
