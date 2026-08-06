@@ -984,6 +984,55 @@ setsid nohup bash -c 'while true; do ssh -N -o BatchMode=yes \
 curl -s http://localhost:11434/api/tags   # 約16モデルが列挙されれば成功
 ```
 
+## A.5b 長い論文は `data_sources` セクションを失う / Long papers lose the `data_sources` section
+
+**症状:** 長めの論文で1セクションだけ失敗します。他の4セクションは正常です。
+
+```
+✗ data_sources  out= 0 tok — RuntimeError: prompt ~28691 tokens exceeds
+  the local context cap 49152 — raise ALD_LOCAL_NCMRD_NUM_CTX or shorten the paper
+```
+
+**算術:** 28,691 < 49,152 なので一見矛盾しますが、ガードは**プロンプト + 出力予算**で
+判定します。`data_sources` はローカルで24,000トークンの出力予算を必要とするため、
+28,691 + 24,000 = 52,691 > 49,152 となり中断します。これは正しい動作です
+（§7 の「無告知の切り詰め」を防ぐガードそのものです）。
+
+**`ALD_LOCAL_NCMRD_NUM_CTX` を上げるだけでは解決しません。** モデル `glm-4.7-flash-48k`
+の実コンテキストが48kだからです。アプリ側の上限だけ上げると、Ollamaが無告知で切り詰め、
+論文の中盤が静かに欠落します（最悪の失敗モード）。
+
+**ボックスには `glm-4.7-flash-64k:latest` があります（重みは同じ19GB）** が、単純な
+切り替えは推奨しません。48kコンテキストで既にVRAM 24GBを使い切っており、64kではKVキャッシュが
+増えて24GBを超え、CPUフォールバック（§A.3と同じ失敗）に陥る可能性が高いためです。
+**検証してから切り替えてください**（`ollama ps` の PROCESSOR 列が 100% GPU であること）。
+
+**Arithmetic:** 28,691 < 49,152, so the message looks self-contradictory — but the guard
+tests **prompt + output budget**. `data_sources` needs a 24,000-token output budget
+locally, so 28,691 + 24,000 = 52,691 > 49,152 and it aborts. That is correct behaviour:
+it is the same guard that prevents Ollama's silent truncation (§7).
+
+**Raising `ALD_LOCAL_NCMRD_NUM_CTX` alone does NOT fix it** — the model's real context is
+48k. Raising only the app-side cap makes Ollama truncate silently and the middle of the
+paper disappears, which is the worst failure mode we have.
+
+**The box has `glm-4.7-flash-64k:latest` (same 19 GB weights)**, but do not switch blindly:
+48k context already consumes the full 24 GB of VRAM, so 64k grows the KV cache past the
+card and likely falls back to CPU — the same failure as §A.3. **Verify before adopting it**
+(`ollama ps` must show `100% GPU` in the PROCESSOR column). The alternative is trimming the
+`data_sources` output budget below 20k, at the cost of truncated figure lists on rich papers.
+
+## A.5c バッチのpushはレビュー待ち行列に入ります / Batch pushes land in the review queue
+
+`--push` は**レコードを直接作成しません**。`ReviewSession` を作成し、キュレーターの承認を
+待ちます。承認後に `store_record` を経てレコード化されます。したがってバッチ実行後も
+`/health` の `records` は増えません — これは正常です。ポータルの Review タブで確認してください。
+
+`--push` does **not** create records directly. It creates a `ReviewSession` that waits for
+curator approval; approval then runs `store_record`. So the `records` count in `/health`
+does not move after a batch — that is correct, not a failure. Look at the portal's Review
+tab instead.
+
 ## A.6 最優先事項 / Highest priority
 
 1つだけ実施するなら **図版画像ファイルの保存場所の特定** です（本編 §5.2 のパイロットは
