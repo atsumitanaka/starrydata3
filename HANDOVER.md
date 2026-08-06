@@ -911,19 +911,40 @@ standing between us and the browser-served app (`ALD_WEB=1`, port 8550).
 **症状:** バッチ実行中、軸名の読み取りと凡例ラベル付けが Ollama から `HTTP 500` を返します。
 曲線トレースは動作するためバッチ自体は完了しますが、この2機能は**無音で無効**になります。
 
-**原因: VRAM不足。** 画像モデル `qwen2.5vl:32b` と NCMRDモデル `glm-4.7-flash-48k` は
-それぞれ約22GBを要求しますが、RTX 4090 は24GBです。両者は同時常駐できず、Ollamaは正常に
-退避せず500を返します。実測: テキストモデル単体で **24,564 MiB 中 22,506 MiB 使用**。
+**原因（`ollama ps` で確定）: モデルがGPUに載っていません。** `qwen2.5vl:32b` は
+コンテキスト49152で **54 GB** を要求し、RTX 4090 の24GBに全く収まりません。その結果
+Ollamaは **100% CPU** にフォールバックし、実用に耐えない速度になります。さらに悪いことに、
+この半端に読み込まれたモデルが `Stopping...` 状態で居座り、**NCMRD用テキストモデルの
+読み込みまでブロック**します。10報のバッチが1報目で19分間停止したのはこれが原因でした。
 
-**対処（root権限が必要）:** 小型の画像モデル `qwen2.5vl:7b`（約6GB、共存可能）を取得して
-画像処理用に使うのが最善です。あるいは Ollama サービスに `OLLAMA_MAX_LOADED_MODELS=1` と
-短い `keep_alive` を設定してモデルを確実に入れ替える方法もありますが、図ごとに22GBのモデルを
-入れ替えるのは実用に耐えません。**10分程度の作業で、以降すべてのバッチで2機能が復旧します。**
+```
+NAME             ID              SIZE     PROCESSOR    CONTEXT    UNTIL
+qwen2.5vl:32b    3edc3a52fe98    54 GB    100% CPU     49152      Stopping...
+```
 
-**Root cause: VRAM.** The vision model and the NCMRD model each want ~22 GB and the 4090
-has 24 GB, so they cannot both be resident; Ollama returns 500 rather than evicting
-cleanly. **Fix (needs root):** pull `qwen2.5vl:7b` (~6 GB) and use it for vision work.
-Ten minutes of work restores two AI features across every future batch.
+**即時の回避策（実装済み・コミット `8c00f41`）:** `ALD_NO_VLM_ASSIST=1` で画像補助を
+完全に無効化できます。この2機能は「あれば良い」補助であり、バッチ全体を止める価値は
+ありません。
+
+**恒久対処（root権限が必要）:** GPUに収まる画像モデルを使うこと。**本日ボックス上に
+`qwen2.5vl:7b` が読み込まれているのを確認しました（22 GB・100% GPU・コンテキスト32768）**
+— こちらはGPUで動作します。ただし NCMRDモデル `glm-4.7-flash-48k`（約22GB）とは依然
+同時常駐できないため、`OLLAMA_MAX_LOADED_MODELS=1` と短い `keep_alive` を併せて設定し、
+確実に入れ替わるようにしてください。
+
+**Root cause (confirmed via `ollama ps`): the model does not fit on the GPU at all.**
+`qwen2.5vl:32b` wants **54 GB** at context 49152 against the 4090's 24 GB, so Ollama falls
+back to **100% CPU** — unusably slow — and the half-loaded model then sits in `Stopping...`
+and **blocks the text model the NCMRD stage needs.** This is what stalled the 10-paper
+batch on paper 1 for 19 minutes.
+
+**Immediate workaround (implemented, commit `8c00f41`):** `ALD_NO_VLM_ASSIST=1` disables
+the vision assists entirely. They are nice-to-have; they are not worth stalling a batch.
+
+**Permanent fix (needs root):** serve a vision model that fits. **`qwen2.5vl:7b` was
+observed loaded on the box today at 22 GB / 100% GPU / context 32768** — that one runs on
+the GPU. It still cannot coexist with the ~22 GB NCMRD model, so pair it with
+`OLLAMA_MAX_LOADED_MODELS=1` and a short `keep_alive` so the two swap deterministically.
 
 ## A.4 KMDS → NCMRD の名称変更完了 / Rename completed
 
