@@ -47084,7 +47084,7 @@
      ]
     },
     "name": {
-     "description": "name of the sample as written in the publication; may include special characters such as subscripts, Greek letters, slashes, or spaces. This field is for human readability and consistency verification (e.g. against Starrydata sample_name); it is not used for machine identification ^-^",
+     "description": "name of the sample as written in the legends in the plots; may include special characters such as subscripts, Greek letters, slashes, or spaces. This field is for human readability and consistency verification (e.g. against Starrydata sample_name); it is not used for machine identification ^-^",
      "type": "string",
      "examples": "BT-fine; Bi2Te2.7Se0.3 (fine grain); Sample A"
     },
